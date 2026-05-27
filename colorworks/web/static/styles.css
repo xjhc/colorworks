@@ -1,0 +1,271 @@
+:root {
+  color-scheme: light;
+  --paper: #f4ebd9;
+  --ink: #121212;
+  --panel: #faf8f1;
+  --line: #c8c0b1;
+  --muted: #665f54;
+  --accent: #0f6f78;
+  --accent-strong: #084d56;
+  --focus: #d43f21;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(230px, 300px);
+  min-height: 100vh;
+}
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px;
+  background: var(--panel);
+}
+
+.rail-left {
+  border-right: 1px solid var(--line);
+}
+
+.rail-right {
+  border-left: 1px solid var(--line);
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+h1,
+h2,
+figure {
+  margin: 0;
+}
+
+h1 {
+  font-size: 24px;
+  font-weight: 760;
+}
+
+h2 {
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.brand span,
+.viewer-toolbar span,
+.meta-list dt {
+  color: var(--muted);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.file-picker {
+  position: relative;
+  display: flex;
+}
+
+.file-picker input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.file-picker span,
+button,
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding: 7px 12px;
+  border: 1px solid var(--ink);
+  border-radius: 6px;
+  background: var(--ink);
+  color: var(--paper);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+button:hover,
+.button:hover,
+.file-picker:hover span {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+
+.button.disabled {
+  pointer-events: none;
+  border-color: var(--line);
+  background: #d8d1c5;
+  color: var(--muted);
+}
+
+.button-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.text-input,
+.select {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fffdf7;
+  color: var(--ink);
+  padding: 7px 9px;
+}
+
+.control {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px 12px;
+  align-items: center;
+}
+
+.control input[type="range"],
+.control select {
+  grid-column: 1 / -1;
+}
+
+.control output {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.meta-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.meta-list div {
+  display: grid;
+  gap: 2px;
+}
+
+.meta-list dt {
+  font-size: 12px;
+}
+
+.meta-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.workspace {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.viewer-toolbar {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  border-bottom: 1px solid var(--line);
+  background: var(--line);
+}
+
+.viewer-toolbar > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px 16px;
+  background: var(--paper);
+}
+
+.viewer-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  background: var(--line);
+}
+
+.viewer {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background:
+    linear-gradient(45deg, rgba(18, 18, 18, 0.05) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(18, 18, 18, 0.05) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(18, 18, 18, 0.05) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(18, 18, 18, 0.05) 75%);
+  background-size: 24px 24px;
+  background-position: 0 0, 0 12px, 12px -12px, -12px 0;
+}
+
+.viewer img {
+  display: none;
+  max-width: 100%;
+  max-height: calc(100vh - 84px);
+  object-fit: contain;
+  image-rendering: pixelated;
+  border: 1px solid rgba(18, 18, 18, 0.18);
+  background: var(--paper);
+}
+
+.viewer img[src] {
+  display: block;
+}
+
+@media (max-width: 980px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .rail-left,
+  .rail-right {
+    border: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .viewer-toolbar,
+  .viewer-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .viewer img {
+    max-height: 58vh;
+  }
+}

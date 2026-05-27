@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Colorworks</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="rail rail-left">
+        <header class="brand">
+          <h1>Colorworks</h1>
+          <span>Phase 0</span>
+        </header>
+
+        <section class="panel">
+          <h2>Asset</h2>
+          <label class="file-picker">
+            <input id="assetInput" type="file" accept="image/*">
+            <span>Choose raster</span>
+          </label>
+          <dl class="meta-list">
+            <div>
+              <dt>Name</dt>
+              <dd id="assetName">None</dd>
+            </div>
+            <div>
+              <dt>Size</dt>
+              <dd id="assetSize">-</dd>
+            </div>
+            <div>
+              <dt>Checksum</dt>
+              <dd id="assetChecksum">-</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="panel">
+          <h2>Recipe</h2>
+          <input id="recipeName" class="text-input" value="Bayer proof" aria-label="Recipe name">
+          <div class="button-row">
+            <button id="saveRecipe" type="button">Save</button>
+            <button id="reloadRecipe" type="button">Load</button>
+          </div>
+          <select id="recipeSelect" class="select" aria-label="Saved recipes"></select>
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <div class="viewer-toolbar">
+          <div>
+            <strong>Source</strong>
+            <span id="sourceStatus">No raster loaded</span>
+          </div>
+          <div>
+            <strong>Output</strong>
+            <span id="renderStatus">Idle</span>
+          </div>
+        </div>
+
+        <div class="viewer-grid">
+          <figure class="viewer">
+            <img id="sourcePreview" alt="Source preview">
+          </figure>
+          <figure class="viewer">
+            <img id="outputPreview" alt="Dithered output">
+          </figure>
+        </div>
+      </section>
+
+      <aside class="rail rail-right">
+        <section class="panel">
+          <h2>Ordered Dither</h2>
+          <label class="control">
+            <span>Bayer matrix</span>
+            <select id="matrixSize" class="select">
+              <option value="2">2 x 2</option>
+              <option value="4">4 x 4</option>
+              <option value="8" selected>8 x 8</option>
+              <option value="16">16 x 16</option>
+            </select>
+          </label>
+
+          <label class="control">
+            <span>Threshold</span>
+            <output id="thresholdValue">0.00</output>
+            <input id="threshold" type="range" min="-0.5" max="0.5" step="0.01" value="0">
+          </label>
+
+          <label class="control">
+            <span>Contrast</span>
+            <output id="contrastValue">1.00</output>
+            <input id="contrast" type="range" min="0.1" max="3" step="0.05" value="1">
+          </label>
+        </section>
+
+        <section class="panel">
+          <h2>Export</h2>
+          <dl class="meta-list">
+            <div>
+              <dt>Render</dt>
+              <dd id="renderTime">-</dd>
+            </div>
+            <div>
+              <dt>Output hash</dt>
+              <dd id="outputChecksum">-</dd>
+            </div>
+          </dl>
+          <a id="exportLink" class="button disabled" href="#" download>Export PNG</a>
+        </section>
+      </aside>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
