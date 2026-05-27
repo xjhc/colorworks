@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import hashlib
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
@@ -195,10 +196,22 @@ class Composition:
     layers: list[InkLayerSpec]
     output_size: tuple[int, int] | None = None
 
+@dataclass
+class WarmStartState:
+    algorithm_id: str
+    algorithm_version: str
+    iteration: int
+    energy: float | None
+    params: dict[str, Any]
+    payload: dict[str, Any] = field(default_factory=dict)
+
 @dataclass(frozen=True)
 class RenderResult:
-    algorithm_primary_artifact_id: str
+    algorithm_primary_artifact_id: str | None = None
     default_composition: Composition | None = None
+    final_artifact_id: str | None = None
+    partial: bool = False
+    warm_state: WarmStartState | None = None
 
 # Substrate, Fields, and Masks
 @dataclass(frozen=True)
@@ -248,6 +261,14 @@ class Stroke:
 class StrokeSet:
     substrate: Substrate
     strokes: list[Stroke]
+
+@dataclass
+class PointSet:
+    substrate: Substrate
+    coords: np.ndarray          # [N, 2]  (x, y)
+    radii: np.ndarray | None = None
+    color_index: np.ndarray | None = None
+    attributes: dict[str, np.ndarray] = field(default_factory=dict)
 
 # WorkingSet and ArtifactStore
 class WorkingSet:
@@ -403,6 +424,9 @@ class ArtifactStore:
         elif isinstance(value, StrokeSet):
             checksum = compute_strokeset_checksum(value)
             type_name = "stroke_set"
+        elif isinstance(value, PointSet):
+            checksum = compute_array_checksum(value.coords)
+            type_name = "point_set"
         elif isinstance(value, Image.Image):
             buf = io.BytesIO()
             value.save(buf, format="PNG")
@@ -492,9 +516,120 @@ class ArtifactStore:
                 else:
                     draw.line([(p[0], p[1]) for p in pts], fill=(26, 26, 26, 255), width=int(w))
             img.save(preview_path, format="PNG")
+        elif artifact.type == "point_set":
+            ps = artifact.value
+            H, W = ps.substrate.height, ps.substrate.width
+            img = Image.new("L", (W, H), 255)
+            from PIL import ImageDraw
+            draw = ImageDraw.Draw(img)
+            for i in range(len(ps.coords)):
+                x, y = ps.coords[i]
+                r = float(ps.radii[i]) if ps.radii is not None else 2.0
+                draw.ellipse([(x - r, y - r), (x + r, y + r)], fill=0)
+            img.save(preview_path, format="PNG")
         elif artifact.type == "raster_image":
             if isinstance(artifact.value, Image.Image):
                 artifact.value.save(preview_path, format="PNG")
             elif hasattr(artifact.value, "data"):
                 img = Image.fromarray(artifact.value.data)
                 img.save(preview_path, format="PNG")
+
+
+# ── Phase 3: cancellation, warm-start, iteration preview ──────────────────────
+
+class CancelToken:
+    def __init__(self) -> None:
+        self._requested = False
+
+    @property
+    def requested(self) -> bool:
+        return self._requested
+
+    def cancel(self) -> None:
+        self._requested = True
+
+
+@dataclass(frozen=True)
+class IterationPreview:
+    mode: Literal["compose", "direct_raster", "inspector"]
+    changed_artifact_ids: list[str] = field(default_factory=list)
+    direct_raster: Any = None       # PIL Image for mode="direct_raster"
+    inspector_artifact_id: str | None = None
+
+
+class RunStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+
+
+@dataclass
+class PreviewRun:
+    id: str
+    session_id: str
+    asset_id: str
+    algorithm_id: str
+    algorithm_version: str
+    params: dict[str, Any]
+    composition: Composition | None
+    seed: int
+    quality: str
+    status: RunStatus = RunStatus.QUEUED
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    superseded_at: datetime | None = None
+    primary_artifact_id: str | None = None
+    final_artifact_id: str | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "session_id": self.session_id,
+            "asset_id": self.asset_id,
+            "algorithm_id": self.algorithm_id,
+            "status": self.status.value,
+            "quality": self.quality,
+            "primary_artifact_id": self.primary_artifact_id,
+            "final_artifact_id": self.final_artifact_id,
+            "error": self.error,
+            "created_at": self.created_at.isoformat(),
+        }
+
+
+@dataclass
+class RenderRun:
+    id: str
+    asset_id: str
+    algorithm_id: str
+    algorithm_version: str
+    params: dict[str, Any]
+    composition: Composition | None
+    seed: int
+    quality: str
+    status: RunStatus = RunStatus.QUEUED
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: datetime | None = None
+    primary_artifact_id: str | None = None
+    final_artifact_id: str | None = None
+    error: str | None = None
+    promoted_from_preview_id: str | None = None
+    artifact_ids: list[str] = field(default_factory=list)
+    recipe_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "asset_id": self.asset_id,
+            "algorithm_id": self.algorithm_id,
+            "status": self.status.value,
+            "quality": self.quality,
+            "primary_artifact_id": self.primary_artifact_id,
+            "final_artifact_id": self.final_artifact_id,
+            "error": self.error,
+            "promoted_from_preview_id": self.promoted_from_preview_id,
+            "artifact_ids": self.artifact_ids,
+            "started_at": self.started_at.isoformat(),
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+        }

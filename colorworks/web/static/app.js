@@ -187,6 +187,90 @@ function scheduleRender() {
   state.renderTimer = window.setTimeout(renderNow, 90);
 }
 
+// ── iterative (Phase 3) algorithms ───────────────────────────────────────────
+
+const ITERATIVE_ALGORITHMS = new Set(["cvt_stippling"]);
+
+let _activeSSE = null;
+let _sessionId = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+
+function isIterative(mode) {
+  if (ITERATIVE_ALGORITHMS.has(mode)) return true;
+  const algo = getActiveAlgorithm(mode);
+  return algo && algo.execution_profile && algo.execution_profile.is_iterative;
+}
+
+async function renderIterative(mode, payload) {
+  if (_activeSSE) { _activeSSE.close(); _activeSSE = null; }
+
+  payload.session_id = _sessionId;
+  const submitResp = await fetch("/api/preview_runs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!submitResp.ok) {
+    const err = await submitResp.json().catch(() => ({}));
+    setStatus(err.error || "Submit failed");
+    return;
+  }
+  const run = await submitResp.json();
+  const runId = run.id;
+  setStatus(`Running (${runId.slice(0, 10)}…)`);
+
+  const sse = new EventSource(`/api/preview_runs/${runId}/events`);
+  _activeSSE = sse;
+
+  sse.addEventListener("iteration", (evt) => {
+    const data = JSON.parse(evt.data);
+    const it = data.iteration !== undefined ? data.iteration + 1 : "?";
+    const energy = data.energy !== null && data.energy !== undefined
+      ? data.energy.toFixed(3) : "";
+    setStatus(`Iteration ${it}${energy ? "  energy=" + energy : ""}`);
+  });
+
+  sse.addEventListener("completed", (evt) => {
+    const data = JSON.parse(evt.data);
+    sse.close(); _activeSSE = null;
+    setStatus("Complete — loading output…");
+    // CVT stippling: primary_artifact_id points to stipple_points,
+    // final_artifact_id points to the raster image
+    const finalId = data.final_artifact_id || data.primary_artifact_id;
+    if (finalId) {
+      state.output = {
+        checksum: finalId,
+        url: `/api/artifacts/${finalId}`,
+        width: state.asset.width,
+        height: state.asset.height,
+        render_ms: 0,
+      };
+      els.exportLink.href = state.output.url;
+      els.exportLink.download = `colorworks-${finalId.slice(0, 12)}.png`;
+      els.exportLink.classList.remove("disabled");
+      updateViewer();
+      refreshChrome();
+      setStatus(`${state.asset.width} × ${state.asset.height}`);
+    }
+  });
+
+  sse.addEventListener("cancelled", () => {
+    sse.close(); _activeSSE = null;
+    setStatus("Cancelled");
+  });
+
+  sse.addEventListener("failed", (evt) => {
+    sse.close(); _activeSSE = null;
+    const data = JSON.parse(evt.data);
+    setStatus("Failed: " + (data.error || "unknown"));
+  });
+
+  sse.onerror = () => {
+    sse.close(); _activeSSE = null;
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function renderNow() {
   if (!state.asset) {
     return;
@@ -198,9 +282,15 @@ async function renderNow() {
     asset_id: state.asset.id,
     renderer_id: mode,
     params: getParams(),
+    seed: 42,
   };
   if (modeUsesComposition(mode)) {
     payload.composition = getComposition();
+  }
+
+  if (isIterative(mode)) {
+    await renderIterative(mode, payload);
+    return;
   }
 
   const response = await fetch("/api/render", {

@@ -6,9 +6,11 @@ import json
 import mimetypes
 import time
 import hashlib
+import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from queue import Empty, Queue
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
@@ -17,6 +19,7 @@ from PIL import Image
 from colorworks.recipe import Recipe
 from colorworks.renderers.bayer import BayerParams, ordered_dither
 from colorworks.storage import LocalStore
+from colorworks.scheduler import RunScheduler
 
 # Import registry and domain elements
 from colorworks.domain import (
@@ -35,6 +38,10 @@ from colorworks.domain import (
     PaletteColor,
     PatternSpec,
     PatternCoordinateSpec,
+    PreviewRun,
+    RenderRun,
+    RunStatus,
+    StrokeSet,
 )
 from colorworks.algorithms import registry, MediaAsset, RenderContext
 from colorworks.compositor import Compositor
@@ -43,6 +50,7 @@ import colorworks.algorithms.tonal_analyzer
 import colorworks.algorithms.pattern_catalog
 import colorworks.algorithms.floyd_steinberg
 import colorworks.algorithms.structure_analyzer
+import colorworks.algorithms.cvt_stippling
 
 STATIC_DIR = Path(__file__).with_name("static")
 
@@ -118,6 +126,33 @@ class ColorworksHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         try:
             route = urlsplit(self.path).path
+
+            # ── Phase 3: preview/render run status + SSE ──────────────────────
+            if route.startswith("/api/preview_runs/") and route.endswith("/events"):
+                run_id = route.removeprefix("/api/preview_runs/").removesuffix("/events")
+                self._handle_sse(run_id)
+                return
+            if route.startswith("/api/render_runs/") and route.endswith("/events"):
+                run_id = route.removeprefix("/api/render_runs/").removesuffix("/events")
+                self._handle_sse(run_id)
+                return
+            if route.startswith("/api/preview_runs/"):
+                run_id = route.rsplit("/", 1)[-1]
+                run = self.server.scheduler.get_run(run_id)
+                if run is None:
+                    self._send_error(HTTPStatus.NOT_FOUND, "preview run not found")
+                else:
+                    self._send_json(run)
+                return
+            if route.startswith("/api/render_runs/"):
+                run_id = route.rsplit("/", 1)[-1]
+                run = self.server.scheduler.get_run(run_id)
+                if run is None:
+                    self._send_error(HTTPStatus.NOT_FOUND, "render run not found")
+                else:
+                    self._send_json(run)
+                return
+
             if route == "/" or route == "/index.html":
                 self._send_file(STATIC_DIR / "index.html", "text/html; charset=utf-8")
             elif route.startswith("/static/"):
@@ -203,6 +238,21 @@ class ColorworksHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         try:
+            route = urlsplit(self.path).path
+
+            # Phase 3 promote endpoint
+            if route.startswith("/api/preview_runs/") and route.endswith("/promote"):
+                run_id = route.removeprefix("/api/preview_runs/").removesuffix("/promote")
+                self._handle_promote(run_id)
+                return
+
+            if route == "/api/preview_runs":
+                self._handle_preview_run_submit()
+                return
+            if route == "/api/render_runs":
+                self._handle_render_run_submit()
+                return
+
             if self.path == "/api/assets":
                 self._handle_asset_upload()
             elif self.path == "/api/render":
@@ -227,6 +277,16 @@ class ColorworksHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         try:
             route = urlsplit(self.path).path
+            if route.startswith("/api/preview_runs/"):
+                run_id = route.rsplit("/", 1)[-1]
+                cancelled = self.server.scheduler.cancel(run_id)
+                self._send_json({"status": "cancelled" if cancelled else "not_found"})
+                return
+            if route.startswith("/api/render_runs/"):
+                run_id = route.rsplit("/", 1)[-1]
+                cancelled = self.server.scheduler.cancel(run_id)
+                self._send_json({"status": "cancelled" if cancelled else "not_found"})
+                return
             if route.startswith("/api/presets/"):
                 preset_id = route.rsplit("/", 1)[-1]
                 self.server.store.delete_preset(preset_id)
@@ -239,6 +299,210 @@ class ColorworksHandler(BaseHTTPRequestHandler):
             self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
         except Exception as exc:
             self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+
+    # ── Phase 3: SSE + iterative runs ─────────────────────────────────────────
+
+    def _handle_sse(self, run_id: str) -> None:
+        q = self.server.scheduler.subscribe(run_id)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        try:
+            while True:
+                try:
+                    event = q.get(timeout=30)
+                except Empty:
+                    # Heartbeat to keep connection alive
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    continue
+
+                if event is None:
+                    # Sentinel — run finished, close stream
+                    break
+
+                kind = event.get("kind", "message")
+                data = json.dumps(event, sort_keys=True)
+                msg = f"event: {kind}\ndata: {data}\n\n".encode("utf-8")
+                self.wfile.write(msg)
+                self.wfile.flush()
+
+                if kind in ("completed", "cancelled", "failed"):
+                    break
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
+    def _build_run_context(self, payload: dict[str, Any]) -> tuple[Any, Any]:
+        """Build (algo, ctx) for an iterative run. Does NOT run analysis."""
+        asset_id = str(payload["asset_id"])
+        renderer_id = str(payload["renderer_id"])
+        record = self.server.store.get_asset(asset_id)
+        algo = registry.get(renderer_id)
+
+        params_dict = payload.get("params", {})
+        params = {}
+        for pd in algo.definition.parameters:
+            val = params_dict.get(pd.key, pd.default)
+            if pd.type == ParameterType.FLOAT:
+                val = float(val)
+            elif pd.type == ParameterType.INT:
+                val = int(val)
+            elif pd.type == ParameterType.BOOL:
+                val = bool(val)
+            elif pd.type == ParameterType.STR:
+                val = str(val)
+            params[pd.key] = val
+
+        substrate = RasterGrid(record.width, record.height)
+        with Image.open(record.path) as img:
+            img_loaded = img.copy()
+        asset = MediaAsset(id=record.id, checksum=record.checksum,
+                           image=img_loaded, substrate=substrate)
+
+        comp_dict = payload.get("composition")
+        comp_obj = self._parse_composition(comp_dict) if comp_dict else None
+
+        ctx = RenderContext(
+            input=asset,
+            params=params,
+            composition=comp_obj,
+            seed=int(payload.get("seed", 42)),
+            quality=str(payload.get("quality", "preview")),
+            store=ArtifactStore(output_dir=self.server.store.artifacts_dir),
+        )
+        return algo, ctx
+
+    def _parse_composition(self, comp_dict: dict) -> Composition:
+        paper_hex = comp_dict.get("paper_color", {}).get("hex", "#f4ebd9")
+        layers_list = []
+        for l in comp_dict.get("layers", []):
+            pat_dict = l.get("pattern", {})
+            pat_spec = PatternSpec(
+                kind=pat_dict.get("kind", "wave"),
+                params=pat_dict.get("params", {}),
+                field_source=pat_dict.get("field_source"),
+                orientation_source=pat_dict.get("orientation_source"),
+                warp_source=pat_dict.get("warp_source"),
+                mask_source=pat_dict.get("mask_source"),
+                coordinates=PatternCoordinateSpec(
+                    space=pat_dict.get("coordinates", {}).get("space", "image_px"),
+                    origin=tuple(pat_dict.get("coordinates", {}).get("origin", [0.0, 0.0])),
+                    scale=float(pat_dict.get("coordinates", {}).get("scale", 1.0)),
+                    rotation_deg=float(pat_dict.get("coordinates", {}).get("rotation_deg", 0.0)),
+                    seed=pat_dict.get("coordinates", {}).get("seed"),
+                ),
+            )
+            layers_list.append(InkLayerSpec(
+                name=l.get("name", "ink"),
+                color=PaletteColor(l.get("color", {}).get("hex", "#1a1a1a")),
+                role=l.get("role", "shadow"),
+                density_source=l.get("density_source", "tone_map"),
+                pattern=pat_spec,
+                threshold=l.get("threshold"),
+                blend_mode=l.get("blend_mode", "normal"),
+                opacity=float(l.get("opacity", 1.0)),
+                priority=int(l.get("priority", 0)),
+            ))
+        return Composition(paper_color=PaletteColor(paper_hex), layers=layers_list)
+
+    def _handle_preview_run_submit(self) -> None:
+        payload = self._read_json()
+        renderer_id = str(payload.get("renderer_id", ""))
+        session_id = str(payload.get("session_id", uuid.uuid4().hex))
+
+        algo, ctx = self._build_run_context(payload)
+
+        # Check warm-start availability
+        warm_state = self.server.scheduler.get_warm_state(session_id)
+        if warm_state and hasattr(algo, "can_warm_start"):
+            if algo.can_warm_start(warm_state, ctx.params):
+                ctx.warm_start = warm_state
+
+        run = PreviewRun(
+            id=f"prev_{uuid.uuid4().hex[:12]}",
+            session_id=session_id,
+            asset_id=ctx.input.id,
+            algorithm_id=algo.definition.id,
+            algorithm_version=algo.definition.version,
+            params=ctx.params,
+            composition=ctx.composition,
+            seed=ctx.seed,
+            quality=ctx.quality,
+        )
+
+        self.server.scheduler.submit_preview(run, algo, ctx, session_id)
+        self._send_json(run.to_dict(), HTTPStatus.ACCEPTED)
+
+    def _handle_render_run_submit(self) -> None:
+        payload = self._read_json()
+        algo, ctx = self._build_run_context(payload)
+        ctx.quality = "full"
+
+        run = RenderRun(
+            id=f"rrun_{uuid.uuid4().hex[:12]}",
+            asset_id=ctx.input.id,
+            algorithm_id=algo.definition.id,
+            algorithm_version=algo.definition.version,
+            params=ctx.params,
+            composition=ctx.composition,
+            seed=ctx.seed,
+            quality="full",
+        )
+
+        self.server.scheduler.submit_render(run, algo, ctx)
+        self._send_json(run.to_dict(), HTTPStatus.ACCEPTED)
+
+    def _handle_promote(self, run_id: str) -> None:
+        """Promote a completed preview run to a durable RenderRun."""
+        # Only completed, non-partial previews may be promoted
+        if not self.server.scheduler.is_exportable(run_id):
+            status = self.server.scheduler.get_run(run_id)
+            if status is None:
+                self._send_error(HTTPStatus.NOT_FOUND, "preview run not found")
+            else:
+                self._send_error(
+                    HTTPStatus.CONFLICT,
+                    f"Cannot promote run in status {status.get('status')}: "
+                    "only completed non-cancelled runs are promotable"
+                )
+            return
+
+        prev_info = self.server.scheduler.get_run(run_id)
+        ctx = self.server.scheduler.get_preview_context(run_id)
+        if ctx is None:
+            self._send_error(HTTPStatus.GONE, "preview context no longer available")
+            return
+
+        rrun = RenderRun(
+            id=f"rrun_{uuid.uuid4().hex[:12]}",
+            asset_id=prev_info["asset_id"],
+            algorithm_id=prev_info["algorithm_id"],
+            algorithm_version=prev_info.get("algorithm_version", "1.0.0"),
+            params=ctx.params,
+            composition=ctx.composition,
+            seed=ctx.seed,
+            quality="full",
+            status=RunStatus.COMPLETED,
+            primary_artifact_id=prev_info.get("primary_artifact_id"),
+            final_artifact_id=prev_info.get("final_artifact_id"),
+            promoted_from_preview_id=run_id,
+            artifact_ids=list(ctx.store.list()),
+        )
+        from datetime import timezone
+        rrun.completed_at = __import__("datetime").datetime.now(timezone.utc)
+        rrun._partial = False
+
+        # Persist to disk
+        self.server.scheduler._persist_render_run(rrun, ctx)
+        with self.server.scheduler._lock:
+            self.server.scheduler._runs[rrun.id] = rrun
+            self.server.scheduler._history[rrun.id] = []
+
+        self._send_json(rrun.to_dict())
+
+    # ── end Phase 3 ───────────────────────────────────────────────────────────
 
     def _handle_preset_save(self) -> None:
         payload = self._read_json()
@@ -297,6 +561,14 @@ class ColorworksHandler(BaseHTTPRequestHandler):
             pass
 
         if algo is not None:
+            # Iterative algorithms must use /api/preview_runs or /api/render_runs
+            from colorworks.algorithms import IterativeAlgorithm
+            if isinstance(algo, IterativeAlgorithm):
+                raise ValueError(
+                    f"'{renderer_id}' is an iterative algorithm and cannot be rendered "
+                    "synchronously. Use POST /api/preview_runs or POST /api/render_runs."
+                )
+
             # 1. Use the shared pipeline execution helper
             ctx, comp_obj, algo, enabled_artifacts = self._execute_pipeline(payload)
 
@@ -845,6 +1117,11 @@ class ColorworksServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], store: LocalStore):
         super().__init__(server_address, ColorworksHandler)
         self.store = store
+        self.scheduler = RunScheduler(store.runs_dir)
+
+    def server_close(self) -> None:
+        self.scheduler.shutdown()
+        super().server_close()
 
 
 def run(host: str, port: int, data_dir: Path) -> None:

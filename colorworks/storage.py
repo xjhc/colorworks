@@ -12,6 +12,7 @@ from typing import Any
 from PIL import Image, UnidentifiedImageError
 
 from colorworks.recipe import Recipe, load_recipe, save_recipe
+from colorworks.domain import ParameterDef
 
 
 SLUG_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
@@ -59,9 +60,11 @@ class LocalStore:
         self.recipes_dir = root / "recipes"
         self.presets_dir = root / "presets"
         self.artifacts_dir = root / "artifacts"
+        self.runs_dir = root / "runs"
         self.index_path = self.artifacts_dir / "index.json"
 
-        for directory in (self.assets_dir, self.outputs_dir, self.recipes_dir, self.presets_dir, self.artifacts_dir):
+        for directory in (self.assets_dir, self.outputs_dir, self.recipes_dir,
+                          self.presets_dir, self.artifacts_dir, self.runs_dir):
             directory.mkdir(parents=True, exist_ok=True)
 
         self._artifacts_index = {}
@@ -374,6 +377,11 @@ class LocalStore:
                 png_path = self.artifacts_dir / f"{cache_key}.png"
                 if png_path.exists():
                     return png_path
+        # Fallback: ArtifactStore.save_preview() writes {artifact_id}.png directly
+        # (used by iterative runs that bypass the cache-key layer)
+        direct_path = self.artifacts_dir / f"{artifact_id}.png"
+        if direct_path.exists():
+            return direct_path
         return None
 
 
