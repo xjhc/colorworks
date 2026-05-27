@@ -149,6 +149,7 @@ class PatternKindDef:
     generation: Literal["procedural", "field", "geometry"] = "procedural"
     requires_density: bool = True
     requires_orientation: bool = False
+    accepts_orientation: bool = False
     requires_warp: bool = False
 
 # Coordinate Frame & Pattern Spec
@@ -184,7 +185,7 @@ class InkLayerSpec:
     density_source: str
     pattern: PatternSpec
     threshold: float | None = None
-    blend_mode: Literal["normal", "multiply", "overprint", "screen"] = "normal"
+    blend_mode: Literal["normal", "multiply"] = "normal"
     opacity: float = 1.0
     priority: int = 0
 
@@ -220,6 +221,34 @@ class BinaryMask:
     substrate: Substrate
     data: np.ndarray  # bool
 
+@dataclass
+class VectorField2D:
+    substrate: Substrate
+    data: np.ndarray  # [H, W, 2]
+    is_bidirectional: bool = False
+
+@dataclass
+class StructureTensorField:
+    substrate: Substrate
+    data: np.ndarray  # [H, W, 3] = (Jxx, Jxy, Jyy)
+
+@dataclass
+class Polyline:
+    points: np.ndarray  # [P, 2]
+    closed: bool = False
+
+@dataclass
+class Stroke:
+    path: Polyline
+    width_profile: np.ndarray | None = None
+    color_index: int = 0
+    opacity_profile: np.ndarray | None = None
+
+@dataclass
+class StrokeSet:
+    substrate: Substrate
+    strokes: list[Stroke]
+
 # WorkingSet and ArtifactStore
 class WorkingSet:
     def __init__(self) -> None:
@@ -246,11 +275,23 @@ class WorkingSet:
             raise TypeError(f"{name} is not a BinaryMask")
         return val
 
+    def get_vector(self, name: str) -> VectorField2D:
+        val = self.get(name)
+        if not isinstance(val, VectorField2D):
+            raise TypeError(f"{name} is not a VectorField2D")
+        return val
+
+    def get_strokes(self, name: str) -> StrokeSet:
+        val = self.get(name)
+        if not isinstance(val, StrokeSet):
+            raise TypeError(f"{name} is not a StrokeSet")
+        return val
+
 @dataclass
 class Artifact:
     id: str
     name: str
-    type: str  # "scalar_field", "binary_mask", "raster_image", etc.
+    type: str  # "scalar_field", "binary_mask", "raster_image", "vector_field_2d", etc.
     value: Any
     checksum: str
     viewer: ArtifactViewerSpec | None = None
@@ -258,6 +299,78 @@ class Artifact:
 def compute_array_checksum(arr: np.ndarray) -> str:
     # Use array byte copy or view to ensure stable byte representation
     return hashlib.sha256(np.ascontiguousarray(arr).tobytes()).hexdigest()
+
+def compute_strokeset_checksum(stroke_set: StrokeSet) -> str:
+    h = hashlib.sha256()
+    for stroke in stroke_set.strokes:
+        h.update(np.ascontiguousarray(stroke.path.points).tobytes())
+        h.update(bytes([1 if stroke.path.closed else 0]))
+        if stroke.width_profile is not None:
+            h.update(np.ascontiguousarray(stroke.width_profile).tobytes())
+        h.update(bytes([stroke.color_index]))
+    return h.hexdigest()
+
+def render_vector_hsv(field: VectorField2D) -> Image.Image:
+    arr = field.data
+    H, W, _ = arr.shape
+    theta = np.arctan2(arr[:, :, 1], arr[:, :, 0])
+    theta_sym = np.mod(theta, np.pi)
+
+    h_arr = (theta_sym / np.pi * 255.0).astype(np.uint8)
+    s_arr = np.full((H, W), 255, dtype=np.uint8)
+    v_arr = np.full((H, W), 255, dtype=np.uint8)
+
+    h_img = Image.fromarray(h_arr, mode="L")
+    s_img = Image.fromarray(s_arr, mode="L")
+    v_img = Image.fromarray(v_arr, mode="L")
+
+    hsv_img = Image.merge("HSV", (h_img, s_img, v_img))
+    return hsv_img.convert("RGB")
+
+def render_vector_glyphs(field: VectorField2D) -> Image.Image:
+    arr = field.data
+    H, W, _ = arr.shape
+    img = Image.new("RGB", (W, H), (30, 30, 36))
+    from PIL import ImageDraw
+    draw = ImageDraw.Draw(img)
+
+    grid_size = 16
+    for y in range(grid_size // 2, H, grid_size):
+        for x in range(grid_size // 2, W, grid_size):
+            vx, vy = arr[y, x]
+            mag = np.hypot(vx, vy)
+            if mag < 1e-5:
+                continue
+            dx = vx / mag
+            dy = vy / mag
+            length = 10.0
+            x1 = x - dx * (length / 2.0)
+            y1 = y - dy * (length / 2.0)
+            x2 = x + dx * (length / 2.0)
+            y2 = y + dy * (length / 2.0)
+            draw.line([(x1, y1), (x2, y2)], fill=(0, 255, 255), width=2)
+    return img
+
+def render_tensor_anisotropy(field: StructureTensorField) -> Image.Image:
+    arr = field.data
+    Jxx = arr[:, :, 0]
+    Jxy = arr[:, :, 1]
+    Jyy = arr[:, :, 2]
+
+    trace = Jxx + Jyy
+    diff = Jxx - Jyy
+    sqrt_term = np.sqrt(diff**2 + 4.0 * Jxy**2)
+
+    lambda1 = 0.5 * (trace + sqrt_term)
+    lambda2 = 0.5 * (trace - sqrt_term)
+
+    denom = lambda1 + lambda2
+    aniso = np.zeros_like(denom)
+    mask = denom > 1e-6
+    aniso[mask] = (lambda1[mask] - lambda2[mask]) / denom[mask]
+
+    arr_uint8 = np.clip(aniso * 255.0, 0.0, 255.0).astype(np.uint8)
+    return Image.fromarray(arr_uint8, mode="L")
 
 class ArtifactStore:
     def __init__(self, output_dir: Path | None = None) -> None:
@@ -281,6 +394,15 @@ class ArtifactStore:
         elif isinstance(value, BinaryMask):
             checksum = compute_array_checksum(value.data)
             type_name = "binary_mask"
+        elif isinstance(value, VectorField2D):
+            checksum = compute_array_checksum(value.data)
+            type_name = "vector_field_2d"
+        elif isinstance(value, StructureTensorField):
+            checksum = compute_array_checksum(value.data)
+            type_name = "structure_tensor_field"
+        elif isinstance(value, StrokeSet):
+            checksum = compute_strokeset_checksum(value)
+            type_name = "stroke_set"
         elif isinstance(value, Image.Image):
             buf = io.BytesIO()
             value.save(buf, format="PNG")
@@ -328,7 +450,7 @@ class ArtifactStore:
             return
         self.output_dir.mkdir(parents=True, exist_ok=True)
         preview_path = self.output_dir / f"{artifact.id}.png"
-        
+
         # Don't recreate if already exists
         if preview_path.exists():
             return
@@ -342,6 +464,33 @@ class ArtifactStore:
             arr = artifact.value.data
             arr_uint8 = np.where(arr, 255, 0).astype(np.uint8)
             img = Image.fromarray(arr_uint8, mode="L")
+            img.save(preview_path, format="PNG")
+        elif artifact.type == "vector_field_2d":
+            img = render_vector_hsv(artifact.value)
+            img.save(preview_path, format="PNG")
+        elif artifact.type == "structure_tensor_field":
+            img = render_tensor_anisotropy(artifact.value)
+            img.save(preview_path, format="PNG")
+        elif artifact.type == "stroke_set":
+            # For preview of StrokeSet, draw black strokes on a transparent canvas
+            H, W = artifact.value.substrate.height, artifact.value.substrate.width
+            img = Image.new("RGBA", (W, H), (255, 255, 255, 0))
+            from PIL import ImageDraw
+            draw = ImageDraw.Draw(img)
+            for stroke in artifact.value.strokes:
+                pts = stroke.path.points
+                if len(pts) < 2:
+                    continue
+                w = 1.0
+                if stroke.width_profile is not None:
+                    # draw segments
+                    for i in range(len(pts) - 1):
+                        p1 = pts[i]
+                        p2 = pts[i + 1]
+                        seg_w = float((stroke.width_profile[i] + stroke.width_profile[i + 1]) / 2.0)
+                        draw.line([(p1[0], p1[1]), (p2[0], p2[1])], fill=(26, 26, 26, 255), width=max(1, int(seg_w)))
+                else:
+                    draw.line([(p[0], p[1]) for p in pts], fill=(26, 26, 26, 255), width=int(w))
             img.save(preview_path, format="PNG")
         elif artifact.type == "raster_image":
             if isinstance(artifact.value, Image.Image):

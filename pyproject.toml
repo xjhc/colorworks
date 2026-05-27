@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "colorworks"
 version = "0.1.0"
-description = "Phase 0 local ordered-dither web tool."
+description = "Local raster-to-print-study web tool."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

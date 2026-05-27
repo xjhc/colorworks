@@ -12,7 +12,7 @@
       <aside class="rail rail-left">
         <header class="brand">
           <h1>Colorworks</h1>
-          <span>Phase 1B</span>
+          <span>Phase 2</span>
         </header>
 
         <section class="panel">
@@ -65,11 +65,19 @@
 
       <section class="workspace">
         <div class="viewer-toolbar">
-          <div class="inspector-tabs" style="display: flex; gap: 8px;">
+          <div class="inspector-tabs" style="display: flex; gap: 8px; align-items: center;">
             <button type="button" class="tab-btn active" data-tab="source" style="min-height: 28px; padding: 4px 8px; font-size: 13px;">Source</button>
             <button type="button" class="tab-btn" data-tab="tone_map" id="tabToneMap" style="min-height: 28px; padding: 4px 8px; font-size: 13px;">Tone Map</button>
             <button type="button" class="tab-btn" data-tab="edge_mask" id="tabEdgeMask" style="min-height: 28px; padding: 4px 8px; font-size: 13px;">Edge Mask</button>
+            <button type="button" class="tab-btn" data-tab="orientation_field" id="tabOrientation" style="min-height: 28px; padding: 4px 8px; font-size: 13px; display: none;">Orientation</button>
             <button type="button" class="tab-btn" data-tab="final" style="min-height: 28px; padding: 4px 8px; font-size: 13px;">Final</button>
+          </div>
+          <div id="vectorControls" style="display: none; align-items: center; gap: 4px; margin-left: 12px;">
+            <label for="vectorViewSelect" style="font-size: 12px; color: var(--muted); cursor: pointer;">View:</label>
+            <select id="vectorViewSelect" class="select" style="min-height: 24px; padding: 0 4px; font-size: 12px; margin: 0; width: auto;">
+              <option value="orientation_hsv" selected>HSV Angle</option>
+              <option value="glyph_field">Glyphs</option>
+            </select>
           </div>
           <div>
             <span id="renderStatus">Idle</span>
@@ -93,6 +101,7 @@
               <option value="ordered_bayer" selected>Phase 0: Bayer Dither</option>
               <option value="tonal_analyzer">Phase 1A: Tonal Wave</option>
               <option value="floyd_steinberg">Phase 1B: Floyd-Steinberg</option>
+              <option value="structure_analyzer">Phase 2: Structure Analyzer</option>
             </select>
           </label>
         </section>
@@ -130,7 +139,10 @@
               <dd id="outputChecksum">-</dd>
             </div>
           </dl>
-          <a id="exportLink" class="button disabled" href="#" download>Export PNG</a>
+          <div class="button-row" style="display: flex; gap: 8px;">
+            <a id="exportLink" class="button disabled" href="#" download style="flex: 1; text-align: center; display: inline-flex; align-items: center; justify-content: center; min-height: 32px;">Export PNG</a>
+            <button id="exportSvgBtn" type="button" class="button disabled" style="flex: 1; min-height: 32px;">Export SVG</button>
+          </div>
         </section>
       </aside>
     </main>

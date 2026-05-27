@@ -3,9 +3,12 @@ const state = {
   output: null,
   tone_map: null,
   edge_mask: null,
+  structure_tensor: null,
+  orientation_field: null,
   renderTimer: null,
   sourceObjectUrl: null,
-  activeTab: "source", // "source" | "tone_map" | "edge_mask" | "final"
+  activeTab: "source", // "source" | "tone_map" | "edge_mask" | "orientation_field" | "final"
+  vectorView: "orientation_hsv",
   schemas: null,
 
   // Composition and Presets state
@@ -34,6 +37,12 @@ const els = {
   saveRecipe: document.querySelector("#saveRecipe"),
   reloadRecipe: document.querySelector("#reloadRecipe"),
   tabButtons: document.querySelectorAll(".tab-btn"),
+  tabToneMap: document.querySelector("#tabToneMap"),
+  tabEdgeMask: document.querySelector("#tabEdgeMask"),
+  tabOrientation: document.querySelector("#tabOrientation"),
+  vectorControls: document.querySelector("#vectorControls"),
+  vectorViewSelect: document.querySelector("#vectorViewSelect"),
+  exportSvgBtn: document.querySelector("#exportSvgBtn"),
 
   // Presets and Layers Elements
   presetSelect: document.querySelector("#presetSelect"),
@@ -47,6 +56,44 @@ const els = {
 
 function getActivePipeline() {
   return els.pipelineSelect.value;
+}
+
+function getActiveAlgorithm(mode = getActivePipeline()) {
+  if (!state.schemas) return null;
+  return state.schemas.algorithms.find((a) => a.id === mode) || null;
+}
+
+function modeUsesComposition(mode = getActivePipeline()) {
+  if (mode === "ordered_bayer") return false;
+  const algo = getActiveAlgorithm(mode);
+  return !algo || algo.role !== "renderer";
+}
+
+function patternDefinition(kind) {
+  if (!state.schemas || !state.schemas.patterns) return null;
+  return state.schemas.patterns.find((p) => p.kind === kind) || null;
+}
+
+function artifactSourceOptions(suitableAs) {
+  const algo = getActiveAlgorithm();
+  const options = [];
+  if (algo && algo.artifact_kinds) {
+    algo.artifact_kinds.forEach((artifact) => {
+      if (artifact.suitable_as && artifact.suitable_as.includes(suitableAs)) {
+        options.push({ value: artifact.name, label: artifact.label || artifact.name });
+      }
+    });
+  }
+  if (suitableAs === "density_source" && !options.some((opt) => opt.value === "tone_map")) {
+    options.push({ value: "tone_map", label: "Tone Map" });
+  }
+  return options;
+}
+
+function compositionHasStrokeLayer(composition = state.composition) {
+  return !!composition && Array.isArray(composition.layers) && composition.layers.some((layer) => {
+    return layer.pattern && (layer.pattern.kind === "hatch" || layer.pattern.kind === "crosshatch");
+  });
 }
 
 function setStatus(message) {
@@ -92,10 +139,10 @@ function getParams() {
 // Read composition
 function getComposition() {
   const mode = getActivePipeline();
-  if (mode !== "tonal_analyzer") return null;
+  if (!modeUsesComposition(mode)) return null;
 
   const preserveEl = document.querySelector("#param-preserve_edges");
-  const preserve_edges = preserveEl ? preserveEl.checked : true;
+  const preserve_edges = preserveEl ? preserveEl.checked : null;
 
   // Synchronize paper color
   if (els.paperColorPicker) {
@@ -105,7 +152,16 @@ function getComposition() {
   // Set mask_source dynamically on layers based on edge preservation
   state.composition.layers.forEach((layer) => {
     if (layer.pattern) {
-      layer.pattern.mask_source = preserve_edges ? "edge_mask" : null;
+      if (!layer.pattern.coordinates) {
+        layer.pattern.coordinates = { space: "image_px" };
+      }
+      if (preserve_edges !== null) {
+        layer.pattern.mask_source = preserve_edges ? "edge_mask" : null;
+      }
+      const patDef = patternDefinition(layer.pattern.kind);
+      if (!patDef || !patDef.accepts_orientation) {
+        layer.pattern.orientation_source = null;
+      }
     }
   });
 
@@ -143,7 +199,7 @@ async function renderNow() {
     renderer_id: mode,
     params: getParams(),
   };
-  if (mode === "tonal_analyzer") {
+  if (modeUsesComposition(mode)) {
     payload.composition = getComposition();
   }
 
@@ -163,11 +219,16 @@ async function renderNow() {
   if (result.artifacts) {
     state.tone_map = result.artifacts.tone_map || null;
     state.edge_mask = result.artifacts.edge_mask || null;
+    state.structure_tensor = result.artifacts.structure_tensor || null;
+    state.orientation_field = result.artifacts.orientation_field || null;
   } else {
     state.tone_map = null;
     state.edge_mask = null;
+    state.structure_tensor = null;
+    state.orientation_field = null;
   }
 
+  refreshChrome();
   updateViewer();
 
   els.renderTime.textContent = `${state.output.render_ms} ms`;
@@ -175,10 +236,37 @@ async function renderNow() {
   els.exportLink.href = state.output.url;
   els.exportLink.download = `colorworks-${state.output.checksum.slice(0, 12)}.png`;
   els.exportLink.classList.remove("disabled");
+  refreshChrome();
   setStatus(`${state.output.width} x ${state.output.height}`);
 }
 
+function syncActiveTabButtons() {
+  els.tabButtons.forEach((btn) => {
+    btn.classList.toggle("active", btn.getAttribute("data-tab") === state.activeTab);
+  });
+}
+
+function refreshChrome() {
+  if (els.tabOrientation) {
+    els.tabOrientation.style.display = state.orientation_field ? "" : "none";
+  }
+  if (!state.orientation_field && state.activeTab === "orientation_field") {
+    state.activeTab = state.output ? "final" : "source";
+  }
+  if (els.vectorControls) {
+    els.vectorControls.style.display =
+      state.orientation_field && state.activeTab === "orientation_field" ? "flex" : "none";
+  }
+  if (els.exportSvgBtn) {
+    const enabled = !!state.asset && modeUsesComposition() && compositionHasStrokeLayer();
+    els.exportSvgBtn.disabled = !enabled;
+    els.exportSvgBtn.classList.toggle("disabled", !enabled);
+  }
+  syncActiveTabButtons();
+}
+
 function updateViewer() {
+  refreshChrome();
   const tab = state.activeTab;
   els.mainViewer.style.display = "none";
   els.noArtifactMsg.style.display = "none";
@@ -205,6 +293,15 @@ function updateViewer() {
       els.mainViewer.style.display = "block";
     } else {
       els.noArtifactMsg.textContent = "Edge mask not generated (or edge preservation disabled)";
+      els.noArtifactMsg.style.display = "block";
+    }
+  } else if (tab === "orientation_field") {
+    if (state.orientation_field && state.orientation_field.url) {
+      const view = state.vectorView || "orientation_hsv";
+      els.mainViewer.src = `${state.orientation_field.url}?view=${encodeURIComponent(view)}&v=${state.orientation_field.id}`;
+      els.mainViewer.style.display = "block";
+    } else {
+      els.noArtifactMsg.textContent = "Orientation field not generated in current pipeline";
       els.noArtifactMsg.style.display = "block";
     }
   } else if (tab === "final") {
@@ -264,7 +361,7 @@ async function saveRecipe() {
     renderer_id: mode,
     params: getParams(),
   };
-  if (mode === "tonal_analyzer") {
+  if (modeUsesComposition(mode)) {
     payload.composition = getComposition();
   }
 
@@ -314,8 +411,9 @@ async function reloadRecipe() {
   renderControlsForMode(recipe.renderer_id || "ordered_bayer");
 
   // Populate loaded values
-  if (recipe.renderer_id !== "ordered_bayer" && state.schemas) {
-    const algo = state.schemas.algorithms.find((a) => a.id === recipe.renderer_id);
+  const recipeMode = recipe.renderer_id || "ordered_bayer";
+  if (recipeMode !== "ordered_bayer" && state.schemas) {
+    const algo = state.schemas.algorithms.find((a) => a.id === recipeMode);
     if (algo) {
       algo.parameters.forEach((param) => {
         const el = document.querySelector(`#param-${param.key}`);
@@ -331,7 +429,7 @@ async function reloadRecipe() {
     }
 
     // Load composition
-    if (recipe.composition) {
+    if (modeUsesComposition(recipeMode) && recipe.composition && Array.isArray(recipe.composition.layers)) {
       state.composition = JSON.parse(JSON.stringify(recipe.composition));
       if (els.paperColorPicker && state.composition.paper_color) {
         els.paperColorPicker.value = state.composition.paper_color.hex;
@@ -368,8 +466,81 @@ async function reloadRecipe() {
   scheduleRender();
 }
 
+function defaultWaveComposition() {
+  return {
+    paper_color: { hex: "#f4ebd9" },
+    layers: [
+      {
+        name: "ink",
+        color: { hex: "#1a1a1a" },
+        role: "shadow",
+        density_source: "tone_map",
+        pattern: {
+          kind: "wave",
+          params: { frequency: 8.0, angle_deg: 45.0, phase: 0.0 },
+          mask_source: "edge_mask",
+          orientation_source: null,
+          coordinates: { space: "image_px" }
+        },
+        threshold: null,
+        blend_mode: "normal",
+        opacity: 1.0,
+        priority: 0
+      }
+    ]
+  };
+}
+
+function defaultStructureComposition() {
+  return {
+    paper_color: { hex: "#f4ebd9" },
+    layers: [
+      {
+        name: "flow_hatch",
+        color: { hex: "#1a1a1a" },
+        role: "shadow",
+        density_source: "tone_map",
+        pattern: {
+          kind: "hatch",
+          params: { frequency: 8.0, angle_deg: 45.0, phase: 0.0 },
+          mask_source: null,
+          orientation_source: "orientation_field",
+          coordinates: { space: "image_px" }
+        },
+        threshold: null,
+        blend_mode: "normal",
+        opacity: 1.0,
+        priority: 0
+      }
+    ]
+  };
+}
+
+function isInitialWaveComposition(composition = state.composition) {
+  if (!composition || composition.layers.length !== 1) return false;
+  const layer = composition.layers[0];
+  return layer.name === "ink" &&
+    layer.density_source === "tone_map" &&
+    layer.pattern &&
+    layer.pattern.kind === "wave" &&
+    layer.pattern.mask_source === "edge_mask";
+}
+
+function ensureCompositionForMode(mode) {
+  if (!modeUsesComposition(mode)) return;
+  if (!state.composition || !state.composition.layers || state.composition.layers.length === 0) {
+    state.composition = mode === "structure_analyzer" ? defaultStructureComposition() : defaultWaveComposition();
+  } else if (mode === "structure_analyzer" && isInitialWaveComposition()) {
+    state.composition = defaultStructureComposition();
+  }
+  if (els.paperColorPicker && state.composition.paper_color) {
+    els.paperColorPicker.value = state.composition.paper_color.hex;
+  }
+}
+
 // Generate dynamic parameter controls from schema
 function renderControlsForMode(mode) {
+  ensureCompositionForMode(mode);
   els.dynamicControls.innerHTML = "";
 
   if (mode === "ordered_bayer") {
@@ -491,19 +662,15 @@ function renderControlsForMode(mode) {
         els.dynamicControls.appendChild(row);
       });
     }
-
-    // Toggle layers panel visibility based on algorithm role
-    const layersPanel = document.querySelector("#layersPanel");
-    if (layersPanel) {
-      if (algo && algo.role === "renderer") {
-        layersPanel.style.display = "none";
-      } else {
-        layersPanel.style.display = "block";
-      }
-    }
-
     updateVisibility();
   }
+
+  const layersPanel = document.querySelector("#layersPanel");
+  if (layersPanel) {
+    layersPanel.style.display = modeUsesComposition(mode) ? "block" : "none";
+  }
+  renderLayersUI();
+  refreshChrome();
 }
 
 function updateVisibility() {
@@ -532,6 +699,7 @@ function renderLayersUI() {
   const container = document.querySelector("#layersList");
   if (!container) return;
   container.innerHTML = "";
+  if (!state.composition || !Array.isArray(state.composition.layers)) return;
 
   state.composition.layers.forEach((layer, index) => {
     const item = document.createElement("div");
@@ -572,6 +740,8 @@ function renderLayersUI() {
     header.appendChild(nameSpan);
     header.appendChild(actions);
     item.appendChild(header);
+
+    const patDef = patternDefinition(layer.pattern.kind);
 
     // Color Input
     const colorLabel = document.createElement("label");
@@ -618,10 +788,12 @@ function renderLayersUI() {
     densityLabel.innerHTML = `<span>Density Source</span>`;
     const densitySelect = document.createElement("select");
     densitySelect.className = "select";
-    const toneOpt = document.createElement("option");
-    toneOpt.value = "tone_map";
-    toneOpt.textContent = "Tone Map";
-    densitySelect.appendChild(toneOpt);
+    artifactSourceOptions("density_source").forEach((source) => {
+      const opt = document.createElement("option");
+      opt.value = source.value;
+      opt.textContent = source.label;
+      densitySelect.appendChild(opt);
+    });
     densitySelect.value = layer.density_source || "tone_map";
     densitySelect.addEventListener("change", (e) => {
       layer.density_source = e.target.value;
@@ -657,17 +829,60 @@ function renderLayersUI() {
           layer.pattern.params[p.key] = p.default;
         });
       }
+      if (!patDef || !patDef.accepts_orientation) {
+        layer.pattern.orientation_source = null;
+      } else if (!layer.pattern.orientation_source && getActivePipeline() === "structure_analyzer") {
+        layer.pattern.orientation_source = "orientation_field";
+      }
       renderLayersUI();
       scheduleRender();
     });
     patternLabel.appendChild(patternSelect);
     item.appendChild(patternLabel);
 
+    if (patDef && patDef.accepts_orientation) {
+      const orientationLabel = document.createElement("label");
+      orientationLabel.className = "control";
+      orientationLabel.innerHTML = `<span>Orientation Source</span>`;
+      const orientationSelect = document.createElement("select");
+      orientationSelect.className = "select";
+
+      const noneOpt = document.createElement("option");
+      noneOpt.value = "";
+      noneOpt.textContent = "None";
+      orientationSelect.appendChild(noneOpt);
+
+      const orientationOptions = artifactSourceOptions("orientation_source");
+      orientationOptions.forEach((source) => {
+        const opt = document.createElement("option");
+        opt.value = source.value;
+        opt.textContent = source.label;
+        orientationSelect.appendChild(opt);
+      });
+
+      if (
+        layer.pattern.orientation_source &&
+        !orientationOptions.some((source) => source.value === layer.pattern.orientation_source)
+      ) {
+        const opt = document.createElement("option");
+        opt.value = layer.pattern.orientation_source;
+        opt.textContent = layer.pattern.orientation_source;
+        orientationSelect.appendChild(opt);
+      }
+
+      orientationSelect.value = layer.pattern.orientation_source || "";
+      orientationSelect.addEventListener("change", (e) => {
+        layer.pattern.orientation_source = e.target.value || null;
+        scheduleRender();
+      });
+      orientationLabel.appendChild(orientationSelect);
+      item.appendChild(orientationLabel);
+    }
+
     // Pattern parameters sub-sliders
     const patternControls = document.createElement("div");
     patternControls.className = "layer-pattern-controls";
 
-    const patDef = state.schemas ? state.schemas.patterns.find((p) => p.kind === layer.pattern.kind) : null;
     if (patDef) {
       patDef.parameters.forEach((param) => {
         const row = document.createElement("div");
@@ -759,15 +974,17 @@ function removeLayer(index) {
 }
 
 function addLayer() {
+  const structureMode = getActivePipeline() === "structure_analyzer";
   const newLayer = {
     name: `Layer ${state.composition.layers.length + 1}`,
     color: { hex: "#1a1a1a" },
     role: "shadow",
     density_source: "tone_map",
     pattern: {
-      kind: "wave",
+      kind: structureMode ? "hatch" : "wave",
       params: { frequency: 8.0, angle_deg: 45.0, phase: 0.0 },
-      mask_source: "edge_mask",
+      mask_source: structureMode ? null : "edge_mask",
+      orientation_source: structureMode ? "orientation_field" : null,
       coordinates: { space: "image_px" }
     },
     threshold: null,
@@ -827,7 +1044,7 @@ async function applyPreset() {
   }
 
   // Load composition if present
-  if (preset.composition) {
+  if (modeUsesComposition(preset.renderer_id) && preset.composition && Array.isArray(preset.composition.layers)) {
     state.composition = JSON.parse(JSON.stringify(preset.composition));
     if (els.paperColorPicker && state.composition.paper_color) {
       els.paperColorPicker.value = state.composition.paper_color.hex;
@@ -850,7 +1067,7 @@ async function savePreset() {
     name: els.newPresetName.value.trim(),
     renderer_id: mode,
     params: getParams(),
-    composition: mode === "tonal_analyzer" ? getComposition() : null
+    composition: modeUsesComposition(mode) ? getComposition() : null
   };
 
   const response = await fetch("/api/presets", {
@@ -895,6 +1112,60 @@ async function deletePreset() {
   setStatus("Preset deleted");
 }
 
+async function exportSvg() {
+  if (!state.asset) {
+    setStatus("Load a raster first");
+    return;
+  }
+  const mode = getActivePipeline();
+  if (!modeUsesComposition(mode)) {
+    setStatus("SVG export needs a composited pipeline");
+    return;
+  }
+
+  const composition = getComposition();
+  if (!compositionHasStrokeLayer(composition)) {
+    setStatus("SVG export needs a hatch or crosshatch layer");
+    return;
+  }
+
+  const payload = {
+    asset_id: state.asset.id,
+    renderer_id: mode,
+    params: getParams(),
+    composition,
+  };
+
+  const response = await fetch("/api/export/svg", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    let message = "SVG export failed";
+    try {
+      const err = await response.json();
+      message = err.error || message;
+    } catch (e) {
+      // Keep the generic message if the server did not return JSON.
+    }
+    setStatus(message);
+    return;
+  }
+
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `colorworks-${state.asset.id.slice(0, 8)}.svg`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  setStatus("SVG exported");
+}
+
 // Fetch schemas and setup initial application state
 async function init() {
   try {
@@ -907,8 +1178,6 @@ async function init() {
   // Setup tab button click handlers
   els.tabButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
-      els.tabButtons.forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
       state.activeTab = btn.getAttribute("data-tab");
       updateViewer();
     });
@@ -916,9 +1185,20 @@ async function init() {
 
   // Handle pipeline mode change
   els.pipelineSelect.addEventListener("change", (e) => {
+    state.tone_map = null;
+    state.edge_mask = null;
+    state.structure_tensor = null;
+    state.orientation_field = null;
     renderControlsForMode(e.target.value);
     scheduleRender();
   });
+
+  if (els.vectorViewSelect) {
+    els.vectorViewSelect.addEventListener("change", (e) => {
+      state.vectorView = e.target.value;
+      updateViewer();
+    });
+  }
 
   els.assetInput.addEventListener("change", (event) => {
     uploadAsset(event.target.files[0]);
@@ -932,6 +1212,7 @@ async function init() {
   if (els.deletePreset) els.deletePreset.addEventListener("click", deletePreset);
   if (els.savePreset) els.savePreset.addEventListener("click", savePreset);
   if (els.addLayerBtn) els.addLayerBtn.addEventListener("click", addLayer);
+  if (els.exportSvgBtn) els.exportSvgBtn.addEventListener("click", exportSvg);
   if (els.paperColorPicker) {
     els.paperColorPicker.addEventListener("change", (e) => {
       state.composition.paper_color.hex = e.target.value;
@@ -940,27 +1221,7 @@ async function init() {
   }
 
   // Default composition
-  state.composition = {
-    paper_color: { hex: "#f4ebd9" },
-    layers: [
-      {
-        name: "ink",
-        color: { hex: "#1a1a1a" },
-        role: "shadow",
-        density_source: "tone_map",
-        pattern: {
-          kind: "wave",
-          params: { frequency: 8.0, angle_deg: 45.0, phase: 0.0 },
-          mask_source: "edge_mask",
-          coordinates: { space: "image_px" }
-        },
-        threshold: null,
-        blend_mode: "normal",
-        opacity: 1.0,
-        priority: 0
-      }
-    ]
-  };
+  state.composition = defaultWaveComposition();
 
   // Initialize controls
   renderControlsForMode(getActivePipeline());

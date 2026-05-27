@@ -22,6 +22,7 @@ from colorworks.storage import LocalStore
 from colorworks.domain import (
     ParameterDef,
     ParameterType,
+    AlgorithmRole,
     AlgorithmDefinition,
     PatternKindDef,
     ScalarField,
@@ -37,11 +38,11 @@ from colorworks.domain import (
 )
 from colorworks.algorithms import registry, MediaAsset, RenderContext
 from colorworks.compositor import Compositor
-
 # Import to populate registry
 import colorworks.algorithms.tonal_analyzer
 import colorworks.algorithms.pattern_catalog
 import colorworks.algorithms.floyd_steinberg
+import colorworks.algorithms.structure_analyzer
 
 STATIC_DIR = Path(__file__).with_name("static")
 
@@ -61,6 +62,11 @@ def parameter_to_dict(p: ParameterDef) -> dict[str, Any]:
         res["max"] = p.max
     if p.step is not None:
         res["step"] = p.step
+    if p.options is not None:
+        res["options"] = [
+            {"value": option.value, "label": option.label}
+            for option in p.options
+        ]
     if p.ui_hint is not None:
         res["ui_hint"] = p.ui_hint
     if p.visible_when is not None and hasattr(p.visible_when, "param_key"):
@@ -78,6 +84,16 @@ def algorithm_to_dict(algo: Any) -> dict[str, Any]:
         "name": defn.name,
         "description": defn.description,
         "version": defn.version,
+        "role": defn.role.value,
+        "artifact_kinds": [
+            {
+                "name": artifact.name,
+                "type": artifact.type,
+                "label": artifact.label,
+                "suitable_as": artifact.suitable_as,
+            }
+            for artifact in defn.artifact_kinds
+        ],
         "parameters": [parameter_to_dict(p) for p in defn.parameters],
     }
 
@@ -87,6 +103,8 @@ def pattern_to_dict(pat: PatternKindDef) -> dict[str, Any]:
         "kind": pat.kind,
         "name": pat.name,
         "description": pat.description,
+        "requires_orientation": pat.requires_orientation,
+        "accepts_orientation": pat.accepts_orientation,
         "parameters": [parameter_to_dict(p) for p in pat.parameters],
     }
 
@@ -123,11 +141,29 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                         self._send_error(HTTPStatus.NOT_FOUND, "artifact meta not found")
             elif route.startswith("/api/artifacts/"):
                 artifact_id = route.rsplit("/", 1)[-1]
-                png_path = self.server.store.get_artifact_path_by_id(artifact_id)
-                if png_path is None or not png_path.exists():
+                query = urlsplit(self.path).query
+                view_mode = "default"
+                if "view=" in query:
+                    parts = query.split("&")
+                    for p in parts:
+                        if p.startswith("view="):
+                            view_mode = p.split("=")[1]
+
+                path = self.server.store.get_artifact_path_by_id(artifact_id)
+                if path is None or not path.exists():
                     self._send_error(HTTPStatus.NOT_FOUND, f"artifact file {artifact_id} not found")
                 else:
-                    self._send_file(png_path, "image/png")
+                    if view_mode == "orientation_hsv":
+                        view_path = path.parent / f"{path.stem}_hsv.png"
+                    elif view_mode == "glyph_field":
+                        view_path = path.parent / f"{path.stem}_glyphs.png"
+                    else:
+                        view_path = path
+
+                    if view_path.exists():
+                        self._send_file(view_path, "image/png")
+                    else:
+                        self._send_file(path, "image/png")
             elif route.startswith("/api/assets/") and route.endswith("/image"):
                 asset_id = route.split("/")[-2]
                 asset = self.server.store.get_asset(asset_id)
@@ -175,6 +211,8 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                 self._handle_recipe_save()
             elif self.path == "/api/presets":
                 self._handle_preset_save()
+            elif self.path == "/api/export/svg":
+                self._handle_export_svg()
             else:
                 self._send_error(HTTPStatus.NOT_FOUND, "not found")
         except ValueError as exc:
@@ -259,42 +297,8 @@ class ColorworksHandler(BaseHTTPRequestHandler):
             pass
 
         if algo is not None:
-            params_dict = payload.get("params", {})
-            comp_dict = payload.get("composition", {})
-
-            # Normalize parameters dynamically
-            params = {}
-            for param_def in algo.definition.parameters:
-                val = params_dict.get(param_def.key)
-                if val is None:
-                    val = param_def.default
-                if param_def.type == ParameterType.FLOAT:
-                    val = float(val)
-                elif param_def.type == ParameterType.INT:
-                    val = int(val)
-                elif param_def.type == ParameterType.BOOL:
-                    val = bool(val)
-                elif param_def.type == ParameterType.STR:
-                    val = str(val)
-                params[param_def.key] = val
-
-            # Load the source asset image
-            substrate = RasterGrid(record.width, record.height)
-            with Image.open(record.path) as img:
-                img_loaded = img.copy()
-            asset = MediaAsset(id=record.id, checksum=record.checksum, image=img_loaded, substrate=substrate)
-
-            from colorworks.domain import AlgorithmRole
-
-            # Setup active run ArtifactStore (with output_dir=None to prevent duplicate file writes!)
-            active_store = ArtifactStore(output_dir=None)
-            ctx = RenderContext(
-                input=asset,
-                params=params,
-                composition=None,
-                seed=int(payload.get("seed", 42)),
-                store=active_store,
-            )
+            # 1. Use the shared pipeline execution helper
+            ctx, comp_obj, algo, enabled_artifacts = self._execute_pipeline(payload)
 
             if algo.definition.role == AlgorithmRole.RENDERER:
                 # Renderer direct execution path (bypasses compositor)
@@ -303,7 +307,7 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                     algo_version=algo.definition.version,
                     artifact_name="final_raster",
                     asset_checksum=record.checksum,
-                    params=params,
+                    params=ctx.params,
                     parameters_def=algo.definition.parameters,
                 )
                 final_cache = self.server.store.get_cached_artifact(final_key)
@@ -319,7 +323,7 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                     algo.analyze(ctx)
                     res_result = algo.compose(ctx)
                     primary_art_id = res_result.algorithm_primary_artifact_id
-                    art = active_store.get(primary_art_id)
+                    art = ctx.store.get(primary_art_id)
 
                     if isinstance(art.value, Image.Image):
                         final_img = art.value
@@ -364,142 +368,19 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                 return
 
             # Analyzer path (runs Compositor)
-            # Determine active / enabled artifacts for this run
-            enabled_artifacts = [
-                name for name in algo.produced_in_analyze
-                if algo.is_artifact_enabled(name, params)
-            ]
-
-            # Compute cache keys for the intermediate artifacts dynamically
-            analyze_cache_keys = {}
-            for name in enabled_artifacts:
-                key = self.server.store.get_artifact_cache_key(
-                    algo_id=algo.definition.id,
-                    algo_version=algo.definition.version,
-                    artifact_name=name,
-                    asset_checksum=record.checksum,
-                    params=params,
-                    parameters_def=algo.definition.parameters
-                )
-                analyze_cache_keys[name] = key
-
-            # Check cache hits for analyze stage
-            analyze_hit = True
-            cached_data = {}
-            cached_meta = {}
-            for name in enabled_artifacts:
-                key = analyze_cache_keys[name]
-                res = self.server.store.get_cached_artifact(key)
-                if res is None:
-                    analyze_hit = False
-                    break
-                else:
-                    cached_data[name] = res[0]
-                    cached_meta[name] = res[1]
-
-            # Run analyze stage (with authoritative caching checks)
-            if analyze_hit:
-                print(f"[CACHE] analyze stage: HIT")
-                published_ids = {}
-                for name in enabled_artifacts:
-                    arr = cached_data[name]
-                    meta = cached_meta[name]
-                    if meta.get("type") == "scalar_field":
-                        field = ScalarField(substrate, arr, "float32")
-                        pub_id = active_store.publish(name, field)
-                        published_ids[name] = pub_id
-                    elif meta.get("type") == "binary_mask":
-                        mask = BinaryMask(substrate, arr)
-                        pub_id = active_store.publish(name, mask)
-                        published_ids[name] = pub_id
-                    else:
-                        pub_id = active_store.publish(name, arr)
-                        published_ids[name] = pub_id
-                algo.load_from_cache(ctx, published_ids)
-            else:
-                print(f"[CACHE] analyze stage: MISS (or partial hit)")
-                published_ids = {}
-                for name in enabled_artifacts:
-                    key = analyze_cache_keys[name]
-                    res = self.server.store.get_cached_artifact(key)
-                    if res is not None:
-                        arr, meta = res
-                        if meta.get("type") == "scalar_field":
-                            field = ScalarField(substrate, arr, "float32")
-                            pub_id = active_store.publish(name, field)
-                            published_ids[name] = pub_id
-                        elif meta.get("type") == "binary_mask":
-                            mask = BinaryMask(substrate, arr)
-                            pub_id = active_store.publish(name, mask)
-                            published_ids[name] = pub_id
-                algo.load_from_cache(ctx, published_ids)
-
-                algo.analyze(ctx)
-
-                # Save newly generated artifacts to cache
-                for name in enabled_artifacts:
-                    try:
-                        art = active_store.get_by_name(name)
-                        key = analyze_cache_keys[name]
-                        if isinstance(art.value, (ScalarField, BinaryMask)):
-                            raw_data = art.value.data
-                        else:
-                            raw_data = art.value
-                        self.server.store.save_cached_artifact(key, raw_data, {
-                            "id": art.id,
-                            "name": name,
-                            "type": art.type,
-                            "checksum": art.checksum
-                        })
-                    except KeyError:
-                        pass
-
-            # Run compose stage
-            res_result = algo.compose(ctx)
-
-            # Setup composition spec
-            if not comp_dict:
-                comp_obj = res_result.default_composition
-            else:
-                paper_hex = comp_dict.get("paper_color", {}).get("hex", "#f4ebd9")
-                layers_list = []
-                for l in comp_dict.get("layers", []):
-                    pat_dict = l.get("pattern", {})
-                    pat_spec = PatternSpec(
-                        kind=pat_dict.get("kind", "wave"),
-                        params=pat_dict.get("params", {}),
-                        mask_source=pat_dict.get("mask_source"),
-                        coordinates=PatternCoordinateSpec(
-                            space=pat_dict.get("coordinates", {}).get("space", "image_px"),
-                            origin=tuple(pat_dict.get("coordinates", {}).get("origin", [0.0, 0.0])),
-                            scale=float(pat_dict.get("coordinates", {}).get("scale", 1.0)),
-                            rotation_deg=float(pat_dict.get("coordinates", {}).get("rotation_deg", 0.0)),
-                            seed=pat_dict.get("coordinates", {}).get("seed"),
-                        )
-                    )
-                    layers_list.append(InkLayerSpec(
-                        name=l.get("name", "ink"),
-                        color=PaletteColor(l.get("color", {}).get("hex", "#1a1a1a")),
-                        role=l.get("role", "shadow"),
-                        density_source=l.get("density_source", "tone_map"),
-                        pattern=pat_spec,
-                        threshold=l.get("threshold"),
-                        blend_mode=l.get("blend_mode", "normal"),
-                        opacity=float(l.get("opacity", 1.0)),
-                        priority=int(l.get("priority", 0)),
-                    ))
-                comp_obj = Composition(
-                    paper_color=PaletteColor(paper_hex),
-                    layers=layers_list,
-                )
-
             # Resolve referenced artifact checksums for the final raster cache key
             referenced_checksums = {}
             for layer in comp_obj.layers:
-                for src in (layer.density_source, layer.pattern.mask_source):
+                for src in (
+                    layer.density_source,
+                    layer.pattern.mask_source,
+                    layer.pattern.orientation_source,
+                    layer.pattern.field_source,
+                    layer.pattern.warp_source,
+                ):
                     if src:
                         try:
-                            art = active_store.get_by_name(src)
+                            art = ctx.store.get_by_name(src)
                             referenced_checksums[src] = art.checksum
                         except KeyError:
                             pass
@@ -519,6 +400,12 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                             "params": l.pattern.params,
                             "mask_source": l.pattern.mask_source,
                             "mask_source_checksum": referenced_checksums.get(l.pattern.mask_source, "") if l.pattern.mask_source else "",
+                            "orientation_source": l.pattern.orientation_source,
+                            "orientation_source_checksum": referenced_checksums.get(l.pattern.orientation_source, "") if l.pattern.orientation_source else "",
+                            "field_source": l.pattern.field_source,
+                            "field_source_checksum": referenced_checksums.get(l.pattern.field_source, "") if l.pattern.field_source else "",
+                            "warp_source": l.pattern.warp_source,
+                            "warp_source_checksum": referenced_checksums.get(l.pattern.warp_source, "") if l.pattern.warp_source else "",
                             "coordinates": {
                                 "space": l.pattern.coordinates.space,
                                 "origin": l.pattern.coordinates.origin,
@@ -553,7 +440,7 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
             else:
                 print(f"[CACHE] final_raster: MISS")
-                compositor = Compositor(active_store)
+                compositor = Compositor(ctx.store)
                 final_img = compositor.composite(comp_obj, record.width, record.height, ctx.seed)
 
                 buf = io.BytesIO()
@@ -576,7 +463,7 @@ class ColorworksHandler(BaseHTTPRequestHandler):
             artifact_responses = {}
             for name in enabled_artifacts:
                 try:
-                    art = active_store.get_by_name(name)
+                    art = ctx.store.get_by_name(name)
                     artifact_responses[name] = {
                         "id": art.id,
                         "url": f"/api/artifacts/{art.id}"
@@ -601,30 +488,297 @@ class ColorworksHandler(BaseHTTPRequestHandler):
         else:
             raise ValueError(f"unsupported renderer_id: {renderer_id}")
 
+    def _execute_pipeline(self, payload: dict[str, Any]) -> tuple[RenderContext, Composition | None, Any, list[str]]:
+        asset_id = str(payload["asset_id"])
+        renderer_id = str(payload.get("renderer_id", "ordered_bayer"))
+
+        record = self.server.store.get_asset(asset_id)
+
+        algo = registry.get(renderer_id)
+
+        params_dict = payload.get("params", {})
+        comp_dict = payload.get("composition", {})
+
+        # Normalize parameters dynamically
+        params = {}
+        for param_def in algo.definition.parameters:
+            val = params_dict.get(param_def.key)
+            if val is None:
+                val = param_def.default
+            if param_def.type == ParameterType.FLOAT:
+                val = float(val)
+            elif param_def.type == ParameterType.INT:
+                val = int(val)
+            elif param_def.type == ParameterType.BOOL:
+                val = bool(val)
+            elif param_def.type == ParameterType.STR:
+                val = str(val)
+            params[param_def.key] = val
+
+        # Load the source asset image
+        substrate = RasterGrid(record.width, record.height)
+        with Image.open(record.path) as img:
+            img_loaded = img.copy()
+        asset = MediaAsset(id=record.id, checksum=record.checksum, image=img_loaded, substrate=substrate)
+
+        # Setup active run ArtifactStore
+        active_store = ArtifactStore(output_dir=None)
+        ctx = RenderContext(
+            input=asset,
+            params=params,
+            composition=None,
+            seed=int(payload.get("seed", 42)),
+            store=active_store,
+        )
+
+        if algo.definition.role == AlgorithmRole.RENDERER:
+            return ctx, None, algo, []
+
+        # Analyzer path
+        enabled_artifacts = [
+            name for name in algo.produced_in_analyze
+            if algo.is_artifact_enabled(name, params)
+        ]
+
+        # Compute cache keys for the intermediate artifacts dynamically
+        analyze_cache_keys = {}
+        for name in enabled_artifacts:
+            key = self.server.store.get_artifact_cache_key(
+                algo_id=algo.definition.id,
+                algo_version=algo.definition.version,
+                artifact_name=name,
+                asset_checksum=record.checksum,
+                params=params,
+                parameters_def=algo.definition.parameters
+            )
+            analyze_cache_keys[name] = key
+
+        # Check cache hits for analyze stage
+        analyze_hit = True
+        cached_data = {}
+        cached_meta = {}
+        for name in enabled_artifacts:
+            key = analyze_cache_keys[name]
+            res = self.server.store.get_cached_artifact(key)
+            if res is None:
+                analyze_hit = False
+                break
+            else:
+                cached_data[name] = res[0]
+                cached_meta[name] = res[1]
+
+        # Run analyze stage (with authoritative caching checks)
+        if analyze_hit:
+            print(f"[CACHE] analyze stage: HIT")
+            published_ids = {}
+            for name in enabled_artifacts:
+                arr = cached_data[name]
+                meta = cached_meta[name]
+                type_name = meta.get("type")
+                if type_name == "scalar_field":
+                    field = ScalarField(substrate, arr, "float32")
+                    pub_id = active_store.publish(name, field)
+                elif type_name == "binary_mask":
+                    mask = BinaryMask(substrate, arr)
+                    pub_id = active_store.publish(name, mask)
+                elif type_name == "vector_field_2d":
+                    from colorworks.domain import VectorField2D
+                    field = VectorField2D(substrate, arr, is_bidirectional=meta.get("is_bidirectional", False))
+                    pub_id = active_store.publish(name, field)
+                elif type_name == "structure_tensor_field":
+                    from colorworks.domain import StructureTensorField
+                    field = StructureTensorField(substrate, arr)
+                    pub_id = active_store.publish(name, field)
+                else:
+                    pub_id = active_store.publish(name, arr)
+                published_ids[name] = pub_id
+            algo.load_from_cache(ctx, published_ids)
+        else:
+            print(f"[CACHE] analyze stage: MISS (or partial hit)")
+            published_ids = {}
+            for name in enabled_artifacts:
+                key = analyze_cache_keys[name]
+                res = self.server.store.get_cached_artifact(key)
+                if res is not None:
+                    arr, meta = res
+                    type_name = meta.get("type")
+                    if type_name == "scalar_field":
+                        field = ScalarField(substrate, arr, "float32")
+                        pub_id = active_store.publish(name, field)
+                    elif type_name == "binary_mask":
+                        mask = BinaryMask(substrate, arr)
+                        pub_id = active_store.publish(name, mask)
+                    elif type_name == "vector_field_2d":
+                        from colorworks.domain import VectorField2D
+                        field = VectorField2D(substrate, arr, is_bidirectional=meta.get("is_bidirectional", False))
+                        pub_id = active_store.publish(name, field)
+                    elif type_name == "structure_tensor_field":
+                        from colorworks.domain import StructureTensorField
+                        field = StructureTensorField(substrate, arr)
+                        pub_id = active_store.publish(name, field)
+                    else:
+                        pub_id = active_store.publish(name, arr)
+                    published_ids[name] = pub_id
+            algo.load_from_cache(ctx, published_ids)
+
+            algo.analyze(ctx)
+
+            # Save newly generated artifacts to cache
+            for name in enabled_artifacts:
+                try:
+                    art = active_store.get_by_name(name)
+                    key = analyze_cache_keys[name]
+                    from colorworks.domain import VectorField2D, StructureTensorField
+                    if isinstance(art.value, (ScalarField, BinaryMask, VectorField2D, StructureTensorField)):
+                        raw_data = art.value.data
+                    else:
+                        raw_data = art.value
+
+                    meta_dict = {
+                        "id": art.id,
+                        "name": name,
+                        "type": art.type,
+                        "checksum": art.checksum
+                    }
+                    if isinstance(art.value, VectorField2D):
+                        meta_dict["is_bidirectional"] = art.value.is_bidirectional
+
+                    self.server.store.save_cached_artifact(key, raw_data, meta_dict)
+                except KeyError:
+                    pass
+
+        # Run compose stage
+        res_result = algo.compose(ctx)
+
+        # Setup composition spec
+        if not comp_dict:
+            comp_obj = res_result.default_composition
+            if comp_obj is None:
+                raise ValueError(f"algorithm {renderer_id} did not provide a composition")
+        else:
+            paper_hex = comp_dict.get("paper_color", {}).get("hex", "#f4ebd9")
+            layers_list = []
+            for l in comp_dict.get("layers", []):
+                pat_dict = l.get("pattern", {})
+                pat_spec = PatternSpec(
+                    kind=pat_dict.get("kind", "wave"),
+                    params=pat_dict.get("params", {}),
+                    field_source=pat_dict.get("field_source"),
+                    orientation_source=pat_dict.get("orientation_source"),
+                    warp_source=pat_dict.get("warp_source"),
+                    mask_source=pat_dict.get("mask_source"),
+                    coordinates=PatternCoordinateSpec(
+                        space=pat_dict.get("coordinates", {}).get("space", "image_px"),
+                        origin=tuple(pat_dict.get("coordinates", {}).get("origin", [0.0, 0.0])),
+                        scale=float(pat_dict.get("coordinates", {}).get("scale", 1.0)),
+                        rotation_deg=float(pat_dict.get("coordinates", {}).get("rotation_deg", 0.0)),
+                        seed=pat_dict.get("coordinates", {}).get("seed"),
+                    )
+                )
+                layers_list.append(InkLayerSpec(
+                    name=l.get("name", "ink"),
+                    color=PaletteColor(l.get("color", {}).get("hex", "#1a1a1a")),
+                    role=l.get("role", "shadow"),
+                    density_source=l.get("density_source", "tone_map"),
+                    pattern=pat_spec,
+                    threshold=l.get("threshold"),
+                    blend_mode=l.get("blend_mode", "normal"),
+                    opacity=float(l.get("opacity", 1.0)),
+                    priority=int(l.get("priority", 0)),
+                ))
+            comp_obj = Composition(
+                paper_color=PaletteColor(paper_hex),
+                layers=layers_list,
+            )
+
+        return ctx, comp_obj, algo, enabled_artifacts
+
+    def _handle_export_svg(self) -> None:
+        payload = self._read_json()
+        ctx, comp_obj, algo, enabled_artifacts = self._execute_pipeline(payload)
+        record = self.server.store.get_asset(payload["asset_id"])
+
+        has_stroke_layer = False
+        for l in comp_obj.layers:
+            if l.pattern.kind in ("hatch", "crosshatch"):
+                has_stroke_layer = True
+                break
+
+        if not has_stroke_layer:
+            self._send_error(HTTPStatus.BAD_REQUEST, "Composition has no hatch/crosshatch stroke layers for SVG export")
+            return
+
+        compositor = Compositor(ctx.store)
+        stroke_sets = compositor.build_stroke_set(comp_obj, record.width, record.height, ctx.seed)
+
+        svg_str = self._serialize_to_svg(comp_obj, stroke_sets, record.width, record.height)
+
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/svg+xml")
+        self.send_header("Content-Length", str(len(svg_str)))
+        self.send_header("Content-Disposition", f"attachment; filename=colorworks-{record.id[:8]}.svg")
+        self.end_headers()
+        self.wfile.write(svg_str.encode("utf-8"))
+
+    def _serialize_to_svg(self, composition: Composition, stroke_sets: list[tuple[InkLayerSpec, StrokeSet]], width: int, height: int) -> str:
+        paper_hex = composition.paper_color.hex
+
+        lines = []
+        lines.append(f'<?xml version="1.0" encoding="UTF-8" standalone="no"?>')
+        lines.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">')
+        lines.append(f'  <rect width="100%" height="100%" fill="{paper_hex}" />')
+
+        for layer, stroke_set in stroke_sets:
+            ink_hex = layer.color.hex
+            opacity = layer.opacity
+            safe_name = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in layer.name)
+            lines.append(f'  <g id="layer_{safe_name}" stroke="{ink_hex}" opacity="{opacity}" stroke-linecap="round" fill="none">')
+
+            for stroke in stroke_set.strokes:
+                pts = stroke.path.points
+                if len(pts) < 2:
+                    continue
+                if stroke.width_profile is not None:
+                    for i in range(len(pts) - 1):
+                        p1 = pts[i]
+                        p2 = pts[i + 1]
+                        w = float((stroke.width_profile[i] + stroke.width_profile[i + 1]) / 2.0)
+                        lines.append(f'    <line x1="{p1[0]:.2f}" y1="{p1[1]:.2f}" x2="{p2[0]:.2f}" y2="{p2[1]:.2f}" stroke-width="{w:.2f}" />')
+                else:
+                    d_path = "M " + " L ".join(f"{p[0]:.2f} {p[1]:.2f}" for p in pts)
+                    lines.append(f'    <path d="{d_path}" stroke-width="1.0" />')
+            lines.append('  </g>')
+
+        lines.append('</svg>')
+        return "\n".join(lines)
+
     def _handle_recipe_save(self) -> None:
         payload = self._read_json()
         renderer_id = str(payload.get("renderer_id", "ordered_bayer"))
         asset_id = str(payload["asset_id"])
         asset = self.server.store.get_asset(asset_id)
 
-        if renderer_id == "tonal_analyzer":
-            params = payload.get("params", {})
-            composition = payload.get("composition", {})
-            recipe = Recipe.create(
-                name=str(payload.get("name") or "Untitled recipe"),
-                asset_id=asset.id,
-                asset_checksum=asset.checksum,
-                params=params,
-                composition=composition,
-                renderer_id="tonal_analyzer",
-            )
-        else:
+        if renderer_id == "ordered_bayer":
             params_payload = payload.get("params")
             recipe = Recipe.create(
                 name=str(payload.get("name") or "Untitled recipe"),
                 asset_id=asset.id,
                 asset_checksum=asset.checksum,
                 params=BayerParams.from_json(params_payload),
+            )
+        else:
+            algo = registry.get(renderer_id)
+            params = payload.get("params", {})
+            composition = None
+            if algo.definition.role != AlgorithmRole.RENDERER:
+                composition = payload.get("composition", {})
+            recipe = Recipe.create(
+                name=str(payload.get("name") or "Untitled recipe"),
+                asset_id=asset.id,
+                asset_checksum=asset.checksum,
+                params=params,
+                composition=composition,
+                renderer_id=renderer_id,
             )
         recipe_id, path = self.server.store.save_recipe(recipe)
         self._send_json({"id": recipe_id, "path": str(path), **recipe.to_json()})
@@ -707,7 +861,7 @@ def run(host: str, port: int, data_dir: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the Colorworks Phase 1A local web tool.")
+    parser = argparse.ArgumentParser(description="Run the Colorworks local web tool.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8020)
     parser.add_argument("--data-dir", type=Path, default=Path("colorworks_data"))

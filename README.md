@@ -1,6 +1,6 @@
 # Colorworks
 
-Phase 0 is a focused local web tool for one renderer: ordered dithering with a Bayer matrix.
+Colorworks is a local raster-to-print-study workbench for ordered dithering, tonal pattern composition, direct error-diffusion rendering, and structure-guided hatch export.
 
 ## Run
 
@@ -8,7 +8,7 @@ Phase 0 is a focused local web tool for one renderer: ordered dithering with a B
 python -m colorworks.web.server
 ```
 
-Then open the printed local URL. Runtime assets, recipes, and output PNGs are written under `./colorworks_data/` by default.
+Then open the printed local URL. Runtime assets, recipes, presets, cached artifacts, output PNGs, and SVG exports are written under `./colorworks_data/` by default.
 
 ## Test
 
@@ -16,11 +16,11 @@ Then open the printed local URL. Runtime assets, recipes, and output PNGs are wr
 python -m pytest
 ```
 
-## Scope
+## Current Scope
 
-- Single raster input.
-- Single black-and-paper output.
-- Bayer matrix size, threshold, and contrast controls.
-- Synchronous local render requests.
-- Recipe JSON saved to disk and reloadable.
-- Export PNG uses the same content-addressed output shown in the UI.
+- Phase 0 ordered Bayer renderer.
+- Phase 1 tonal analyzer with composited ink layers, presets, and pattern catalog.
+- Phase 1B Floyd-Steinberg direct renderer.
+- Phase 2 structure tensor / ETF orientation analyzer with hatch and crosshatch SVG export.
+- Recipe and preset JSON saved to disk and reloadable.
+- Content-addressed caches for intermediate artifacts and final outputs.

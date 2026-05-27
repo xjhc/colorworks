@@ -180,7 +180,7 @@ class LocalStore:
         for path in sorted(self.presets_dir.glob("*.json"), key=lambda p: p.stat().st_mtime):
             try:
                 preset_data = json.loads(path.read_text(encoding="utf-8"))
-                preset_data["id"] = path.style.stem if hasattr(path, 'style') else path.stem
+                preset_data["id"] = path.stem
                 preset_data["is_builtin"] = False
                 presets.append(preset_data)
             except Exception:
@@ -272,7 +272,6 @@ class LocalStore:
             # Fallback
             s = f"edge_mask:{asset_checksum}:preserve={preserve_edges}:threshold={edge_threshold:.4f}"
             return hashlib.sha256(s.encode("utf-8")).hexdigest()
-
     def get_final_raster_cache_key(self, tone_map_checksum: str, edge_mask_checksum: str | None, composition_json: str) -> str:
         s = f"final_raster:tone={tone_map_checksum}:edge={edge_mask_checksum or ''}:{composition_json}"
         return hashlib.sha256(s.encode("utf-8")).hexdigest()
@@ -301,7 +300,7 @@ class LocalStore:
                 )
 
             type_name = meta.get("type")
-            if type_name in ("scalar_field", "binary_mask") and npy_path.exists():
+            if type_name in ("scalar_field", "binary_mask", "vector_field_2d", "structure_tensor_field") and npy_path.exists():
                 import numpy as np
                 arr = np.load(npy_path)
                 return arr, meta
@@ -322,13 +321,29 @@ class LocalStore:
 
         if isinstance(data, np.ndarray):
             np.save(npy_path, data)
-            if data.dtype == bool:
-                arr_uint8 = np.where(data, 255, 0).astype(np.uint8)
-                img = Image.fromarray(arr_uint8, mode="L")
+            if metadata.get("type") == "vector_field_2d":
+                from colorworks.domain import VectorField2D, render_vector_hsv, render_vector_glyphs, RasterGrid
+                grid = RasterGrid(width=data.shape[1], height=data.shape[0])
+                field = VectorField2D(grid, data, is_bidirectional=metadata.get("is_bidirectional", False))
+                hsv_img = render_vector_hsv(field)
+                hsv_img.save(png_path, format="PNG")
+                hsv_img.save(self.artifacts_dir / f"{cache_key}_hsv.png", format="PNG")
+                glyphs_img = render_vector_glyphs(field)
+                glyphs_img.save(self.artifacts_dir / f"{cache_key}_glyphs.png", format="PNG")
+            elif metadata.get("type") == "structure_tensor_field":
+                from colorworks.domain import StructureTensorField, render_tensor_anisotropy, RasterGrid
+                grid = RasterGrid(width=data.shape[1], height=data.shape[0])
+                field = StructureTensorField(grid, data)
+                aniso_img = render_tensor_anisotropy(field)
+                aniso_img.save(png_path, format="PNG")
             else:
-                arr_uint8 = np.clip(data * 255.0, 0.0, 255.0).astype(np.uint8)
-                img = Image.fromarray(arr_uint8, mode="L")
-            img.save(png_path, format="PNG")
+                if data.dtype == bool:
+                    arr_uint8 = np.where(data, 255, 0).astype(np.uint8)
+                    img = Image.fromarray(arr_uint8, mode="L")
+                else:
+                    arr_uint8 = np.clip(data * 255.0, 0.0, 255.0).astype(np.uint8)
+                    img = Image.fromarray(arr_uint8, mode="L")
+                img.save(png_path, format="PNG")
         elif isinstance(data, Image.Image):
             data.save(png_path, format="PNG")
         elif isinstance(data, bytes):

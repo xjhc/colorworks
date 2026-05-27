@@ -128,6 +128,48 @@ registry.register_pattern(PatternKindDef(
     description="Parallel lines pattern modulated by density.",
     generation="procedural",
     requires_density=True,
+    requires_orientation=False,
+    accepts_orientation=True,
+    parameters=[
+        ParameterDef(
+            "frequency",
+            "Frequency (cycles / 100 px)",
+            ParameterType.FLOAT,
+            default=8.0,
+            min=0.5,
+            max=64.0,
+            step=0.5,
+        ),
+        ParameterDef(
+            "angle_deg",
+            "Angle (deg)",
+            ParameterType.FLOAT,
+            default=45.0,
+            min=0.0,
+            max=180.0,
+            step=1.0,
+        ),
+        ParameterDef(
+            "phase",
+            "Phase",
+            ParameterType.FLOAT,
+            default=0.0,
+            min=0.0,
+            max=1.0,
+            step=0.01,
+        ),
+    ],
+))
+
+# 6. Crosshatch Pattern
+registry.register_pattern(PatternKindDef(
+    kind="crosshatch",
+    name="Crosshatch",
+    description="Crosshatch lines pattern modulated by density and orientation.",
+    generation="procedural",
+    requires_density=True,
+    requires_orientation=False,
+    accepts_orientation=True,
     parameters=[
         ParameterDef(
             "frequency",
