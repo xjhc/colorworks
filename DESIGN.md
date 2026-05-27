@@ -1330,17 +1330,26 @@ Two interaction modes:
 
 ## 14. Phasing — the binding plan
 
-Build in this order. Each phase ends with a usable product, not just plumbing.
+Build in this order. Each phase ends with a usable product, not just plumbing. Every phase must leave behind agent-verifiable evidence: tests, a smoke path, and a short note on what was intentionally deferred.
 
 Research map: Phase 2 is motivated by `RESEARCH.md` §4.1–§4.2, Phase 3 by §2.2 and §3.1, Phase 4 by §2.1–§2.3 and §5, and Phase 5 by §4.3. Phase 0–1B are product-loop scaffolding plus cheap procedural patterns.
 
+Agent handoff template for every phase:
+
+- **Deliverables:** concrete files/features the coding agent is expected to add.
+- **Acceptance checks:** commands or UI/API flows another agent can run locally.
+- **Evidence:** checksums, screenshots, timings, exported files, or test names to report.
+- **Deferred:** explicit non-goals so later phases do not mistake omissions for bugs.
+
 ### Phase 0 — Prove the loop (1 week)
 
-- One algorithm: **ordered dither** (Bayer matrix) as a self-contained renderer. Hardcoded UI controls.
-- Single raster input, single output. Black + paper only. No compositor, no ink layers.
-- Sync execution. No DB, no SSE. JSON on disk for asset + recipe.
-- One artifact viewer: raster.
-- **Goal:** slider → render → display feels right.
+Deliverables:
+- One self-contained renderer: **ordered dither** (Bayer matrix).
+- Local web UI with raster upload, source/output preview, controls for matrix size, threshold, and contrast.
+- Sync render API only. No DB, no SSE, no auth, no compositor, no ink layers.
+- JSON recipe save/load on disk.
+- PNG export of the displayed output.
+- Focused package/tests around Bayer rendering and recipe round-trip.
 
 Acceptance checks:
 - Load one local raster from disk.
@@ -1348,70 +1357,193 @@ Acceptance checks:
 - Render a 1MP image in under 200 ms on a typical laptop.
 - Save recipe JSON and reload it to reproduce the same output checksum.
 - Export a PNG matching the displayed canvas.
+- Run unit tests for renderer and recipe serialization.
+
+Evidence to report:
+- Test command and pass/fail count.
+- Render timing for a roughly 1MP image.
+- Original render checksum, reloaded-recipe render checksum, and exported PNG checksum.
+- Local URL or command used to launch the tool.
+
+Deferred:
+- Algorithm catalog, compositor, ink layers, artifact DAG, SSE, background workers.
 
 ### Phase 1A — Tone analyzer + Compositor with one pattern (1–1.5 weeks)
 
 The architecture-proving milestone. **One analyzer, one pattern kind, one ink layer composition.**
 
-- One algorithm: `TonalAnalyzer` (publishes `tone_map` + `edge_mask`).
-- One pattern kind in the `PatternKindDef` registry: **wave**.
-- Build the **Compositor** as a built-in service (one ink layer, then layer it later).
-- Schema-driven UI: algorithm params on right rail; ink-layer pattern params in a separate panel; both generated from definitions.
-- Introduce `WorkingSet` + `ArtifactStore` + `ArtifactViewerSpec`.
-- Inspector tabs auto-populated: source, tone map, edge mask, final.
-- **Goal:** `TonalAnalyzer` + `wave` pattern + 1-layer composition produces a correct wave halftone with edge preservation. Adding the *second* pattern kind (Phase 1B) touches no algorithm code.
+Deliverables:
+- `TonalAnalyzer` publishing `tone_map` and optional `edge_mask`.
+- Minimal `AlgorithmDefinition`, `PatternKindDef`, `ParameterDef`, `WorkingSet`, `ArtifactStore`, and `ArtifactViewerSpec` sufficient for one analyzer.
+- One compositor-owned pattern kind: **wave**.
+- One-layer `Composition` with paper + ink, density source, optional mask source, and `PatternCoordinateSpec`.
+- Schema-generated controls for analyzer params and wave pattern params.
+- Inspector tabs: source, tone map, edge mask, final.
+
+Acceptance checks:
+- Rendering `TonalAnalyzer` with the default wave composition produces `tone_map`, `edge_mask`, and `final_raster` artifacts.
+- Changing ink color or wave params changes only compositor/final cache keys; `tone_map` checksum remains unchanged.
+- Changing contrast or midpoint changes `tone_map` and downstream final output.
+- A saved preset/recipe reloads to the same final checksum.
+- Adding a second procedural pattern in a test fixture requires no algorithm code changes.
+
+Evidence to report:
+- Artifact IDs/checksums for source, tone map, edge mask, final.
+- Cache-hit/miss log for palette-only vs tone-param changes.
+- UI screenshot or browser smoke output showing inspector tabs.
+
+Deferred:
+- Multi-layer editing polish, vector output, iterative previews, background queues.
 
 ### Phase 1B — Pattern catalog + a renderer (1 week)
 
-- Add pattern kinds: **maze**, **blue_noise**, **ordered_dither**, **hatch**.
-- Add one renderer algorithm: **Floyd-Steinberg** (`HALFTONING` family, `RENDERER` role). Bypasses the Compositor; produces a final binary raster directly.
-- File-based artifact cache keyed per artifact (§8.5).
-- Multi-layer composition support (paper + shadow + highlight).
-- Right-rail ink layers panel with per-layer pattern params (schema-driven from `PatternKindDef`).
-- Recipe + Preset CRUD with composition snapshots.
-- Ship presets that bundle `TonalAnalyzer` + composition: "Wave Halftone," "Maze Halftone," "Hatch."
-- **Goal:** the same tone_map drives three different presets (wave/maze/hatch) without re-running analysis; one renderer (Floyd-Steinberg) coexists cleanly without going through the Compositor.
+Deliverables:
+- Pattern kinds: **maze**, **blue_noise**, **ordered_dither**, **hatch**.
+- One direct renderer algorithm: **Floyd-Steinberg** (`HALFTONING` family, `RENDERER` role), bypassing the Compositor.
+- File-based per-artifact cache implementing the §8.5 key rules.
+- Multi-layer composition support: paper + at least two ink layers.
+- Right-rail layer UI for add/remove/reorder, color, blend mode, density source, and per-layer pattern params.
+- Preset CRUD with composition snapshots.
+- Built-in presets: "Wave Halftone," "Maze Halftone," "Hatch."
+
+Acceptance checks:
+- One uploaded raster can render the three presets from the same cached `tone_map`.
+- Palette-only or layer-order changes re-render final output without re-running `TonalAnalyzer`.
+- Floyd-Steinberg produces a final raster with no compositor artifacts.
+- Multi-layer composition order changes the output checksum predictably.
+- Preset save/load round-trips params, layer order, colors, pattern params, and source refs.
+
+Evidence to report:
+- Cache logs proving analyzer reuse across presets.
+- Checksums for wave/maze/hatch outputs from the same source/tone map.
+- Test proving renderer role skips compositor.
+
+Deferred:
+- Orientation fields, vector/SVG export, iterative algorithms.
 
 ### Phase 2 — Orientation-aware + vector output (2–3 weeks)
 
-- Add `StructureAnalyzer` algorithm publishing structure tensor + ETF as `VectorField2D` artifacts.
-- Orientation-driven **hatch** + **crosshatch** pattern kinds (consuming `orientation_source`).
-- Vector field artifact viewer (HSV / glyph / LIC variants).
-- First-class `Polyline` + `StrokeSet` types.
-- SVG export pipeline (for hatch + future stroke output).
-- **Goal:** orientation field + ink layer + SVG export compose cleanly.
+Deliverables:
+- `StructureAnalyzer` publishing structure tensor and ETF/orientation `VectorField2D` artifacts.
+- Orientation-driven **hatch** and **crosshatch** pattern kinds consuming `orientation_source`.
+- Vector-field viewers: at least HSV angle view and downsampled glyph view; LIC may be optional behind a flag.
+- First-class `Polyline`, `Stroke`, and `StrokeSet` types.
+- SVG export for hatch/crosshatch output.
+
+Acceptance checks:
+- A source image produces an orientation artifact visible in the inspector.
+- Hatch orientation changes when `orientation_source` is swapped or disabled.
+- SVG export opens as valid XML and contains expected path/stroke elements.
+- Raster preview and SVG export agree on layer count, colors, and output bounds.
+- Missing or wrong-type `orientation_source` is rejected with a user-safe validation error.
+
+Evidence to report:
+- Screenshot/browser output for orientation viewer and hatch output.
+- SVG file path, size, and validation command.
+- Tests covering vector-field type checks and SVG bounds.
+
+Deferred:
+- Lloyd/Pang iteration, mesh cross-fields, temporal coherence.
 
 ### Phase 3 — Iteration + streaming (2–3 weeks)
 
-- Add **CVT stippling** (Lloyd relaxation) and **Pang structure-aware halftoning** (annealing).
-- Implement `IterativeAlgorithm` + `RenderProgress` + SSE.
-- Wire up `PreviewRun` cancellation and `RenderRun` promotion paths.
-- Warm-start contract (§6.5).
-- Background worker (asyncio in-process; RQ when multi-user).
-- **Goal:** slider drag during a Pang run cancels and warm-starts cleanly; first iteration preview within ~1s.
+Deliverables:
+- `IterativeAlgorithm`, `RenderProgress`, `IterationPreview`, and `PreviewCompositor`.
+- SSE event endpoints for preview/render runs.
+- `PreviewRun` cancellation, supersession, and `RenderRun` promotion.
+- Warm-start state for at least one iterative algorithm.
+- **CVT stippling** (Lloyd relaxation) and a first **Pang-style structure-aware halftoning** implementation.
+- In-process asyncio background worker.
+
+Acceptance checks:
+- Iterative run emits `started`, multiple `iteration`, and terminal `completed` events over SSE.
+- Cancelling emits `cancelled`, does not create history, and makes warm-start state available.
+- A subsequent compatible parameter change warm-starts from prior state and reaches first preview faster than cold start.
+- `IterationPreview(mode=\"compose\")` produces a composed ink-layer preview from partial artifacts.
+- Promoting a completed preview creates a durable `RenderRun` whose artifacts survive restart.
+
+Evidence to report:
+- SSE transcript for completed and cancelled runs.
+- Timing comparison: cold first preview vs warm-start first preview.
+- Test proving cancelled partial output cannot be exported as final.
+- Stored `RenderRun` metadata/artifact listing after restart.
+
+Deferred:
+- Redis/RQ, multi-user scheduling, GPU slots.
 
 ### Phase 4 — Advanced halftoning + first neural hook (long)
 
-- **SAED** (exercises calibration LUTs).
-- **Electrostatic halftoning** (N-body with NFFT).
-- **DBS** as a quality reference.
-- First neural component: I2FNet for learned ETF (treated as an analyzer with `requires_gpu=True`).
-- GPU-aware scheduling.
+Deliverables:
+- **SAED** with immutable calibration assets.
+- **Electrostatic halftoning** with an accelerated path or bounded fallback.
+- **DBS** as a quality-reference renderer, not necessarily interactive.
+- First neural analyzer hook, e.g. I2FNet-style learned ETF, marked `requires_gpu=True`.
+- GPU-aware scheduling and capability flags.
+
+Acceptance checks:
+- Calibration asset checksum/version is recorded in every run using it.
+- Replacing/re-cooking a calibration asset requires either algorithm version bump or explicit `calibration_version`.
+- DBS reference output is deterministic under fixed seed and small fixture input.
+- GPU-required analyzer is hidden/disabled with a clear message when GPU is unavailable.
+- CPU-only renderers still run while GPU jobs are queued.
+
+Evidence to report:
+- Run snapshot showing calibration checksum/version.
+- Determinism test hashes for DBS fixture.
+- Scheduler test/log showing GPU capability routing.
+- Quality comparison fixture: SAED/Pang/DBS outputs with metric table.
+
+Deferred:
+- Mesh substrate, full plugin system, production multi-tenant GPU cluster.
 
 ### Phase 5 — Mesh substrate (research budget, long)
 
-- `MeshSurface` inputs.
-- N-RoSy cross-field smoothing.
-- TAM-based surface hatching with lapped texturing.
-- Three.js viewer in the frontend.
-- Defer until raster work is mature; mesh adds ~5× the surface area.
+Deliverables:
+- `MeshSurface` asset ingestion for a small standard mesh format.
+- N-RoSy cross-field smoothing on mesh faces.
+- TAM-based surface hatching with nested tone levels.
+- Three.js viewer with source mesh, field overlay, and hatch output.
+- Mesh artifact viewers and export path.
+
+Acceptance checks:
+- Import a fixture mesh and show it in the browser without blank canvas or camera framing errors.
+- Cross-field smoothing produces deterministic output on a fixture mesh.
+- TAM nesting invariant is tested: darker/finer levels preserve lighter/coarser strokes.
+- Camera movement does not visibly swim strokes for a fixed surface hatch fixture.
+- Mesh-specific artifacts are isolated from raster-only flows.
+
+Evidence to report:
+- Browser screenshot or Playwright canvas-pixel check.
+- Cross-field artifact checksum for fixture mesh.
+- TAM nesting test name/result.
+- Exported mesh/hatch artifact path.
+
+Deferred:
+- Video, temporal coherence, user-defined mesh plugins.
 
 ### Phase 6 — Video / temporal coherence
 
-- `VideoVolume` substrate.
-- `StreamingAlgorithm` base class.
+- `VideoVolume` substrate and fixture video ingestion.
+- `StreamingAlgorithm` state-passing protocol.
 - Optical-flow ETF propagation for temporally coherent line drawing.
-- Frame scrubber UI.
+- Frame scrubber UI and per-frame artifact inspection.
+- Export of rendered frame sequence or short video.
+
+Acceptance checks:
+- Fixture clip imports with correct frame count, dimensions, and fps.
+- A streaming render produces frame-indexed artifacts and progress events.
+- Scrubbing frames updates source/output/artifact views without stale display.
+- Temporal coherence metric improves over independent per-frame rendering on a fixture.
+- Parameter change mid-stream follows a documented state reset/resume behavior.
+
+Evidence to report:
+- Imported video metadata.
+- SSE/progress transcript with frame numbers.
+- Temporal metric table: independent vs propagated.
+- Exported frame sequence/video path.
+
+Deferred:
+- Collaboration, cloud rendering, live camera input.
 
 ---
 
