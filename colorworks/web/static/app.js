@@ -7,6 +7,13 @@ const state = {
   sourceObjectUrl: null,
   activeTab: "source", // "source" | "tone_map" | "edge_mask" | "final"
   schemas: null,
+
+  // Composition and Presets state
+  composition: {
+    paper_color: { hex: "#f4ebd9" },
+    layers: []
+  },
+  presets: []
 };
 
 const els = {
@@ -27,6 +34,15 @@ const els = {
   saveRecipe: document.querySelector("#saveRecipe"),
   reloadRecipe: document.querySelector("#reloadRecipe"),
   tabButtons: document.querySelectorAll(".tab-btn"),
+
+  // Presets and Layers Elements
+  presetSelect: document.querySelector("#presetSelect"),
+  loadPreset: document.querySelector("#loadPreset"),
+  deletePreset: document.querySelector("#deletePreset"),
+  newPresetName: document.querySelector("#newPresetName"),
+  savePreset: document.querySelector("#savePreset"),
+  paperColorPicker: document.querySelector("#paperColorPicker"),
+  addLayerBtn: document.querySelector("#addLayerBtn"),
 };
 
 function getActivePipeline() {
@@ -61,6 +77,8 @@ function getParams() {
         if (el) {
           if (param.type === "bool") {
             params[param.key] = el.checked;
+          } else if (param.type === "str") {
+            params[param.key] = el.value;
           } else {
             params[param.key] = Number(el.value);
           }
@@ -71,48 +89,30 @@ function getParams() {
   return params;
 }
 
-// Read composition (for tonal_analyzer)
+// Read composition
 function getComposition() {
-  if (!state.schemas) return null;
-
-  // Find pattern params dynamically
-  const wave = state.schemas.patterns.find((p) => p.kind === "wave");
-  const waveParams = {};
-  if (wave) {
-    wave.parameters.forEach((param) => {
-      const el = document.querySelector(`#pat-${param.key}`);
-      if (el) {
-        waveParams[param.key] = Number(el.value);
-      }
-    });
-  }
+  const mode = getActivePipeline();
+  if (mode !== "tonal_analyzer") return null;
 
   const preserveEl = document.querySelector("#param-preserve_edges");
   const preserve_edges = preserveEl ? preserveEl.checked : true;
 
-  return {
-    paper_color: { hex: "#f4ebd9", name: "paper" },
-    layers: [
-      {
-        name: "ink",
-        color: { hex: "#1a1a1a", name: "ink" },
-        role: "shadow",
-        density_source: "tone_map",
-        pattern: {
-          kind: "wave",
-          params: waveParams,
-          mask_source: preserve_edges ? "edge_mask" : null,
-          coordinates: {
-            space: "image_px",
-          },
-        },
-      },
-    ],
-  };
+  // Synchronize paper color
+  if (els.paperColorPicker) {
+    state.composition.paper_color.hex = els.paperColorPicker.value;
+  }
+
+  // Set mask_source dynamically on layers based on edge preservation
+  state.composition.layers.forEach((layer) => {
+    if (layer.pattern) {
+      layer.pattern.mask_source = preserve_edges ? "edge_mask" : null;
+    }
+  });
+
+  return state.composition;
 }
 
 function updateControlLabels() {
-  // Updates any visible output indicators
   document.querySelectorAll(".control").forEach((ctrl) => {
     const input = ctrl.querySelector("input[type='range']");
     const output = ctrl.querySelector("output");
@@ -161,8 +161,8 @@ async function renderNow() {
 
   state.output = result.output;
   if (result.artifacts) {
-    state.tone_map = result.artifacts.tone_map;
-    state.edge_mask = result.artifacts.edge_mask;
+    state.tone_map = result.artifacts.tone_map || null;
+    state.edge_mask = result.artifacts.edge_mask || null;
   } else {
     state.tone_map = null;
     state.edge_mask = null;
@@ -314,7 +314,6 @@ async function reloadRecipe() {
   renderControlsForMode(recipe.renderer_id || "ordered_bayer");
 
   // Populate loaded values
-  // Populate loaded values
   if (recipe.renderer_id !== "ordered_bayer" && state.schemas) {
     const algo = state.schemas.algorithms.find((a) => a.id === recipe.renderer_id);
     if (algo) {
@@ -328,25 +327,16 @@ async function reloadRecipe() {
           }
         }
       });
-      // Update visibility after toggling checkboxes
       updateVisibility();
     }
 
-    // Load wave pattern parameters
-    if (recipe.composition && recipe.composition.layers && recipe.composition.layers.length > 0) {
-      const inkLayer = recipe.composition.layers[0];
-      if (inkLayer.pattern && inkLayer.pattern.params) {
-        const patternKind = inkLayer.pattern.kind;
-        const patDef = state.schemas.patterns.find((p) => p.kind === patternKind);
-        if (patDef) {
-          patDef.parameters.forEach((param) => {
-            const el = document.querySelector(`#pat-${param.key}`);
-            if (el) {
-              el.value = inkLayer.pattern.params[param.key];
-            }
-          });
-        }
+    // Load composition
+    if (recipe.composition) {
+      state.composition = JSON.parse(JSON.stringify(recipe.composition));
+      if (els.paperColorPicker && state.composition.paper_color) {
+        els.paperColorPicker.value = state.composition.paper_color.hex;
       }
+      renderLayersUI();
     }
   } else {
     // ordered_bayer
@@ -418,14 +408,11 @@ function renderControlsForMode(mode) {
       ctrl.addEventListener("input", scheduleRender);
       ctrl.addEventListener("change", scheduleRender);
     });
-  } else if (mode === "tonal_analyzer" && state.schemas) {
-    // Retrieve tonal_analyzer and wave pattern schemas
-    const algo = state.schemas.algorithms.find((a) => a.id === "tonal_analyzer");
-    const wave = state.schemas.patterns.find((p) => p.kind === "wave");
-
+  } else if (state.schemas) {
+    const algo = state.schemas.algorithms.find((a) => a.id === mode);
     if (algo) {
       const heading = document.createElement("h3");
-      heading.textContent = "Analyzer Params";
+      heading.textContent = `${algo.name} Params`;
       heading.style.margin = "8px 0 4px 0";
       heading.style.fontSize = "13px";
       els.dynamicControls.appendChild(heading);
@@ -452,6 +439,27 @@ function renderControlsForMode(mode) {
             updateVisibility();
             scheduleRender();
           });
+        } else if (param.type === "str" && param.ui_hint === "color") {
+          // Color input
+          row.style.gridTemplateColumns = "1fr auto";
+          const span = document.createElement("span");
+          span.textContent = param.label;
+
+          const colorInput = document.createElement("input");
+          colorInput.id = `param-${param.key}`;
+          colorInput.type = "color";
+          colorInput.value = param.default;
+          colorInput.style.width = "40px";
+          colorInput.style.height = "24px";
+          colorInput.style.border = "none";
+          colorInput.style.cursor = "pointer";
+          colorInput.style.padding = "0";
+
+          row.appendChild(span);
+          row.appendChild(colorInput);
+
+          colorInput.addEventListener("input", scheduleRender);
+          colorInput.addEventListener("change", scheduleRender);
         } else {
           // Float or Int
           row.style.gridTemplateColumns = "1fr auto";
@@ -484,45 +492,16 @@ function renderControlsForMode(mode) {
       });
     }
 
-    if (wave) {
-      const heading = document.createElement("h3");
-      heading.textContent = "Wave Pattern Params";
-      heading.style.margin = "16px 0 4px 0";
-      heading.style.fontSize = "13px";
-      els.dynamicControls.appendChild(heading);
-
-      wave.parameters.forEach((param) => {
-        const row = document.createElement("div");
-        row.className = "control";
-        row.style.gridTemplateColumns = "1fr auto";
-
-        const span = document.createElement("span");
-        span.textContent = param.label;
-
-        const output = document.createElement("output");
-        output.textContent = Number(param.default).toFixed(2);
-
-        const slider = document.createElement("input");
-        slider.id = `pat-${param.key}`;
-        slider.type = "range";
-        slider.min = String(param.min !== undefined ? param.min : 0);
-        slider.max = String(param.max !== undefined ? param.max : 1);
-        slider.step = String(param.step !== undefined ? param.step : 0.01);
-        slider.value = String(param.default);
-
-        row.appendChild(span);
-        row.appendChild(output);
-        row.appendChild(slider);
-
-        slider.addEventListener("input", (e) => {
-          output.textContent = Number(e.target.value).toFixed(2);
-          scheduleRender();
-        });
-        slider.addEventListener("change", scheduleRender);
-
-        els.dynamicControls.appendChild(row);
-      });
+    // Toggle layers panel visibility based on algorithm role
+    const layersPanel = document.querySelector("#layersPanel");
+    if (layersPanel) {
+      if (algo && algo.role === "renderer") {
+        layersPanel.style.display = "none";
+      } else {
+        layersPanel.style.display = "block";
+      }
     }
+
     updateVisibility();
   }
 }
@@ -546,6 +525,374 @@ function updateVisibility() {
       }
     }
   });
+}
+
+// Render dynamic layers UI
+function renderLayersUI() {
+  const container = document.querySelector("#layersList");
+  if (!container) return;
+  container.innerHTML = "";
+
+  state.composition.layers.forEach((layer, index) => {
+    const item = document.createElement("div");
+    item.className = "layer-item";
+    item.dataset.index = index;
+
+    // Header with reordering and removal buttons
+    const header = document.createElement("div");
+    header.className = "layer-header";
+
+    const nameSpan = document.createElement("span");
+    nameSpan.textContent = layer.name || `Layer ${index + 1}`;
+
+    const actions = document.createElement("div");
+    actions.className = "layer-actions";
+
+    const upBtn = document.createElement("button");
+    upBtn.type = "button";
+    upBtn.textContent = "▲";
+    upBtn.disabled = index === 0;
+    upBtn.addEventListener("click", () => moveLayer(index, -1));
+
+    const downBtn = document.createElement("button");
+    downBtn.type = "button";
+    downBtn.textContent = "▼";
+    downBtn.disabled = index === state.composition.layers.length - 1;
+    downBtn.addEventListener("click", () => moveLayer(index, 1));
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "btn-remove-layer";
+    removeBtn.textContent = "✖";
+    removeBtn.addEventListener("click", () => removeLayer(index));
+
+    actions.appendChild(upBtn);
+    actions.appendChild(downBtn);
+    actions.appendChild(removeBtn);
+    header.appendChild(nameSpan);
+    header.appendChild(actions);
+    item.appendChild(header);
+
+    // Color Input
+    const colorLabel = document.createElement("label");
+    colorLabel.className = "control";
+    colorLabel.innerHTML = `<span>Ink Color</span>`;
+    const colorInput = document.createElement("input");
+    colorInput.type = "color";
+    colorInput.value = layer.color.hex;
+    colorInput.style.width = "40px";
+    colorInput.style.height = "24px";
+    colorInput.style.border = "none";
+    colorInput.style.cursor = "pointer";
+    colorInput.style.padding = "0";
+    colorInput.addEventListener("input", (e) => {
+      layer.color.hex = e.target.value;
+      scheduleRender();
+    });
+    colorLabel.appendChild(colorInput);
+    item.appendChild(colorLabel);
+
+    // Blend Mode Select
+    const blendLabel = document.createElement("label");
+    blendLabel.className = "control";
+    blendLabel.innerHTML = `<span>Blend Mode</span>`;
+    const blendSelect = document.createElement("select");
+    blendSelect.className = "select";
+    ["normal", "multiply"].forEach((m) => {
+      const opt = document.createElement("option");
+      opt.value = m;
+      opt.textContent = m.charAt(0).toUpperCase() + m.slice(1);
+      if (layer.blend_mode === m) opt.selected = true;
+      blendSelect.appendChild(opt);
+    });
+    blendSelect.addEventListener("change", (e) => {
+      layer.blend_mode = e.target.value;
+      scheduleRender();
+    });
+    blendLabel.appendChild(blendSelect);
+    item.appendChild(blendLabel);
+
+    // Density Source Select
+    const densityLabel = document.createElement("label");
+    densityLabel.className = "control";
+    densityLabel.innerHTML = `<span>Density Source</span>`;
+    const densitySelect = document.createElement("select");
+    densitySelect.className = "select";
+    const toneOpt = document.createElement("option");
+    toneOpt.value = "tone_map";
+    toneOpt.textContent = "Tone Map";
+    densitySelect.appendChild(toneOpt);
+    densitySelect.value = layer.density_source || "tone_map";
+    densitySelect.addEventListener("change", (e) => {
+      layer.density_source = e.target.value;
+      scheduleRender();
+    });
+    densityLabel.appendChild(densitySelect);
+    item.appendChild(densityLabel);
+
+    // Pattern Kind Select
+    const patternLabel = document.createElement("label");
+    patternLabel.className = "control";
+    patternLabel.innerHTML = `<span>Pattern Kind</span>`;
+    const patternSelect = document.createElement("select");
+    patternSelect.className = "select";
+
+    if (state.schemas && state.schemas.patterns) {
+      state.schemas.patterns.forEach((p) => {
+        const opt = document.createElement("option");
+        opt.value = p.kind;
+        opt.textContent = p.name;
+        if (layer.pattern.kind === p.kind) opt.selected = true;
+        patternSelect.appendChild(opt);
+      });
+    }
+
+    patternSelect.addEventListener("change", (e) => {
+      layer.pattern.kind = e.target.value;
+      // Populate defaults for new pattern
+      const patDef = state.schemas.patterns.find((p) => p.kind === e.target.value);
+      layer.pattern.params = {};
+      if (patDef) {
+        patDef.parameters.forEach((p) => {
+          layer.pattern.params[p.key] = p.default;
+        });
+      }
+      renderLayersUI();
+      scheduleRender();
+    });
+    patternLabel.appendChild(patternSelect);
+    item.appendChild(patternLabel);
+
+    // Pattern parameters sub-sliders
+    const patternControls = document.createElement("div");
+    patternControls.className = "layer-pattern-controls";
+
+    const patDef = state.schemas ? state.schemas.patterns.find((p) => p.kind === layer.pattern.kind) : null;
+    if (patDef) {
+      patDef.parameters.forEach((param) => {
+        const row = document.createElement("div");
+        row.className = "control";
+        row.style.gridTemplateColumns = "1fr auto";
+
+        const span = document.createElement("span");
+        span.textContent = param.label;
+
+        const val = layer.pattern.params[param.key] !== undefined ? layer.pattern.params[param.key] : param.default;
+        const output = document.createElement("output");
+
+        if (param.type === "int") {
+          output.textContent = parseInt(val);
+        } else {
+          output.textContent = Number(val).toFixed(2);
+        }
+
+        let inputEl;
+        if (param.options) {
+          inputEl = document.createElement("select");
+          inputEl.className = "select";
+          param.options.forEach((opt) => {
+            const o = document.createElement("option");
+            o.value = opt.value;
+            o.textContent = opt.label;
+            if (val === opt.value) o.selected = true;
+            inputEl.appendChild(o);
+          });
+          inputEl.addEventListener("change", (e) => {
+            layer.pattern.params[param.key] = Number(e.target.value);
+            scheduleRender();
+          });
+        } else {
+          inputEl = document.createElement("input");
+          inputEl.type = "range";
+          inputEl.min = String(param.min !== undefined ? param.min : 0);
+          inputEl.max = String(param.max !== undefined ? param.max : 100);
+          inputEl.step = String(param.step !== undefined ? param.step : 1);
+          inputEl.value = String(val);
+          inputEl.addEventListener("input", (e) => {
+            if (param.type === "int") {
+              output.textContent = parseInt(e.target.value);
+              layer.pattern.params[param.key] = parseInt(e.target.value);
+            } else {
+              output.textContent = Number(e.target.value).toFixed(2);
+              layer.pattern.params[param.key] = Number(e.target.value);
+            }
+            scheduleRender();
+          });
+          inputEl.addEventListener("change", scheduleRender);
+        }
+
+        row.appendChild(span);
+        row.appendChild(output);
+        row.appendChild(inputEl);
+        patternControls.appendChild(row);
+      });
+    }
+
+    item.appendChild(patternControls);
+    container.appendChild(item);
+  });
+}
+
+function moveLayer(index, direction) {
+  const targetIndex = index + direction;
+  if (targetIndex < 0 || targetIndex >= state.composition.layers.length) return;
+
+  const temp = state.composition.layers[index];
+  state.composition.layers[index] = state.composition.layers[targetIndex];
+  state.composition.layers[targetIndex] = temp;
+
+  state.composition.layers.forEach((l, idx) => {
+    l.priority = idx;
+  });
+
+  renderLayersUI();
+  scheduleRender();
+}
+
+function removeLayer(index) {
+  state.composition.layers.splice(index, 1);
+  state.composition.layers.forEach((l, idx) => {
+    l.priority = idx;
+  });
+  renderLayersUI();
+  scheduleRender();
+}
+
+function addLayer() {
+  const newLayer = {
+    name: `Layer ${state.composition.layers.length + 1}`,
+    color: { hex: "#1a1a1a" },
+    role: "shadow",
+    density_source: "tone_map",
+    pattern: {
+      kind: "wave",
+      params: { frequency: 8.0, angle_deg: 45.0, phase: 0.0 },
+      mask_source: "edge_mask",
+      coordinates: { space: "image_px" }
+    },
+    threshold: null,
+    blend_mode: "normal",
+    opacity: 1.0,
+    priority: state.composition.layers.length
+  };
+  state.composition.layers.push(newLayer);
+  renderLayersUI();
+  scheduleRender();
+}
+
+// Preset CRUD logic
+async function loadPresetsList() {
+  const res = await fetch("/api/presets");
+  const data = await res.json();
+  state.presets = data.presets;
+
+  if (els.presetSelect) {
+    els.presetSelect.innerHTML = "";
+    state.presets.forEach((preset) => {
+      const opt = document.createElement("option");
+      opt.value = preset.id;
+      opt.textContent = preset.name + (preset.is_builtin ? " (Built-in)" : "");
+      els.presetSelect.appendChild(opt);
+    });
+  }
+}
+
+async function applyPreset() {
+  if (!els.presetSelect || !els.presetSelect.value) return;
+  const preset = state.presets.find((p) => p.id === els.presetSelect.value);
+  if (!preset) return;
+
+  // Load pipeline
+  els.pipelineSelect.value = preset.renderer_id;
+  renderControlsForMode(preset.renderer_id);
+
+  // Set parameters
+  if (state.schemas) {
+    const algo = state.schemas.algorithms.find((a) => a.id === preset.renderer_id);
+    if (algo) {
+      algo.parameters.forEach((param) => {
+        const el = document.querySelector(`#param-${param.key}`);
+        if (el) {
+          if (param.type === "bool") {
+            el.checked = !!preset.params[param.key];
+          } else if (param.type === "str") {
+            el.value = preset.params[param.key];
+          } else {
+            el.value = preset.params[param.key];
+          }
+        }
+      });
+      updateVisibility();
+    }
+  }
+
+  // Load composition if present
+  if (preset.composition) {
+    state.composition = JSON.parse(JSON.stringify(preset.composition));
+    if (els.paperColorPicker && state.composition.paper_color) {
+      els.paperColorPicker.value = state.composition.paper_color.hex;
+    }
+    renderLayersUI();
+  }
+
+  scheduleRender();
+  setStatus(`Applied preset: ${preset.name}`);
+}
+
+async function savePreset() {
+  if (!els.newPresetName || !els.newPresetName.value.trim()) {
+    setStatus("Enter a preset name first");
+    return;
+  }
+
+  const mode = getActivePipeline();
+  const payload = {
+    name: els.newPresetName.value.trim(),
+    renderer_id: mode,
+    params: getParams(),
+    composition: mode === "tonal_analyzer" ? getComposition() : null
+  };
+
+  const response = await fetch("/api/presets", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  const result = await response.json();
+  if (!response.ok) {
+    setStatus(result.error || "Save preset failed");
+    return;
+  }
+
+  els.newPresetName.value = "";
+  await loadPresetsList();
+  if (els.presetSelect) els.presetSelect.value = result.id;
+  setStatus("Preset saved");
+}
+
+async function deletePreset() {
+  if (!els.presetSelect || !els.presetSelect.value) return;
+
+  const presetId = els.presetSelect.value;
+  const preset = state.presets.find((p) => p.id === presetId);
+  if (preset && preset.is_builtin) {
+    setStatus("Cannot delete a built-in preset");
+    return;
+  }
+
+  const response = await fetch(`/api/presets/${presetId}`, {
+    method: "DELETE"
+  });
+
+  if (!response.ok) {
+    const err = await response.json();
+    setStatus(err.error || "Delete failed");
+    return;
+  }
+
+  await loadPresetsList();
+  setStatus("Preset deleted");
 }
 
 // Fetch schemas and setup initial application state
@@ -580,10 +927,47 @@ async function init() {
   els.saveRecipe.addEventListener("click", saveRecipe);
   els.reloadRecipe.addEventListener("click", reloadRecipe);
 
+  // Setup Presets and Layers UI event listeners
+  if (els.loadPreset) els.loadPreset.addEventListener("click", applyPreset);
+  if (els.deletePreset) els.deletePreset.addEventListener("click", deletePreset);
+  if (els.savePreset) els.savePreset.addEventListener("click", savePreset);
+  if (els.addLayerBtn) els.addLayerBtn.addEventListener("click", addLayer);
+  if (els.paperColorPicker) {
+    els.paperColorPicker.addEventListener("change", (e) => {
+      state.composition.paper_color.hex = e.target.value;
+      scheduleRender();
+    });
+  }
+
+  // Default composition
+  state.composition = {
+    paper_color: { hex: "#f4ebd9" },
+    layers: [
+      {
+        name: "ink",
+        color: { hex: "#1a1a1a" },
+        role: "shadow",
+        density_source: "tone_map",
+        pattern: {
+          kind: "wave",
+          params: { frequency: 8.0, angle_deg: 45.0, phase: 0.0 },
+          mask_source: "edge_mask",
+          coordinates: { space: "image_px" }
+        },
+        threshold: null,
+        blend_mode: "normal",
+        opacity: 1.0,
+        priority: 0
+      }
+    ]
+  };
+
   // Initialize controls
   renderControlsForMode(getActivePipeline());
   updateControlLabels();
   updateVisibility();
+  renderLayersUI();
+  await loadPresetsList();
   await loadRecipeList();
   updateViewer();
 }

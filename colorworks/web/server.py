@@ -40,6 +40,8 @@ from colorworks.compositor import Compositor
 
 # Import to populate registry
 import colorworks.algorithms.tonal_analyzer
+import colorworks.algorithms.pattern_catalog
+import colorworks.algorithms.floyd_steinberg
 
 STATIC_DIR = Path(__file__).with_name("static")
 
@@ -150,6 +152,12 @@ class ColorworksHandler(BaseHTTPRequestHandler):
             elif route.startswith("/api/outputs/"):
                 checksum = route.rsplit("/", 1)[-1].removesuffix(".png")
                 self._send_file(self.server.store.output_path(checksum), "image/png")
+            elif route == "/api/presets":
+                self._send_json({"presets": self.server.store.list_presets()})
+            elif route.startswith("/api/presets/"):
+                preset_id = route.rsplit("/", 1)[-1]
+                preset = self.server.store.get_preset(preset_id)
+                self._send_json(preset)
             else:
                 self._send_error(HTTPStatus.NOT_FOUND, "not found")
         except KeyError as exc:
@@ -165,6 +173,8 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                 self._handle_render()
             elif self.path == "/api/recipes":
                 self._handle_recipe_save()
+            elif self.path == "/api/presets":
+                self._handle_preset_save()
             else:
                 self._send_error(HTTPStatus.NOT_FOUND, "not found")
         except ValueError as exc:
@@ -175,6 +185,28 @@ class ColorworksHandler(BaseHTTPRequestHandler):
             import traceback
             traceback.print_exc()
             self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+
+    def do_DELETE(self) -> None:
+        try:
+            route = urlsplit(self.path).path
+            if route.startswith("/api/presets/"):
+                preset_id = route.rsplit("/", 1)[-1]
+                self.server.store.delete_preset(preset_id)
+                self._send_json({"status": "deleted"})
+            else:
+                self._send_error(HTTPStatus.NOT_FOUND, "not found")
+        except KeyError as exc:
+            self._send_error(HTTPStatus.NOT_FOUND, str(exc))
+        except ValueError as exc:
+            self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+        except Exception as exc:
+            self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+
+    def _handle_preset_save(self) -> None:
+        payload = self._read_json()
+        preset_id = self.server.store.save_preset(payload)
+        preset = self.server.store.get_preset(preset_id)
+        self._send_json(preset)
 
     def _handle_asset_upload(self) -> None:
         content = self._read_body(max_bytes=64 * 1024 * 1024)
@@ -252,6 +284,86 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                 img_loaded = img.copy()
             asset = MediaAsset(id=record.id, checksum=record.checksum, image=img_loaded, substrate=substrate)
 
+            from colorworks.domain import AlgorithmRole
+
+            # Setup active run ArtifactStore (with output_dir=None to prevent duplicate file writes!)
+            active_store = ArtifactStore(output_dir=None)
+            ctx = RenderContext(
+                input=asset,
+                params=params,
+                composition=None,
+                seed=int(payload.get("seed", 42)),
+                store=active_store,
+            )
+
+            if algo.definition.role == AlgorithmRole.RENDERER:
+                # Renderer direct execution path (bypasses compositor)
+                final_key = self.server.store.get_artifact_cache_key(
+                    algo_id=algo.definition.id,
+                    algo_version=algo.definition.version,
+                    artifact_name="final_raster",
+                    asset_checksum=record.checksum,
+                    params=params,
+                    parameters_def=algo.definition.parameters,
+                )
+                final_cache = self.server.store.get_cached_artifact(final_key)
+
+                if final_cache is not None:
+                    print(f"[CACHE] final_raster (renderer): HIT")
+                    final_png_path, final_meta = final_cache
+                    final_checksum = final_meta["checksum"]
+                    final_bytes = final_png_path.read_bytes()
+                    elapsed_ms = (time.perf_counter() - started) * 1000.0
+                else:
+                    print(f"[CACHE] final_raster (renderer): MISS")
+                    algo.analyze(ctx)
+                    res_result = algo.compose(ctx)
+                    primary_art_id = res_result.algorithm_primary_artifact_id
+                    art = active_store.get(primary_art_id)
+
+                    if isinstance(art.value, Image.Image):
+                        final_img = art.value
+                    elif hasattr(art.value, "data"):
+                        final_img = Image.fromarray(art.value.data)
+                    else:
+                        raise ValueError("primary artifact for renderer must be an image")
+
+                    buf = io.BytesIO()
+                    final_img.save(buf, format="PNG")
+                    final_bytes = buf.getvalue()
+                    final_checksum = hashlib.sha256(final_bytes).hexdigest()
+
+                    # Save to cache
+                    self.server.store.save_cached_artifact(final_key, final_bytes, {
+                        "id": f"final_raster_{final_checksum[:16]}",
+                        "name": "final_raster",
+                        "type": "raster_image",
+                        "checksum": final_checksum
+                    })
+                    # Save to normal outputs dir
+                    self.server.store.save_output(final_bytes)
+                    elapsed_ms = (time.perf_counter() - started) * 1000.0
+
+                self._send_json(
+                    {
+                        "output": {
+                            "checksum": final_checksum,
+                            "url": f"/api/outputs/{final_checksum}.png",
+                            "width": record.width,
+                            "height": record.height,
+                            "render_ms": round(elapsed_ms, 2),
+                        },
+                        "artifacts": {
+                            "final_raster": {
+                                "id": f"final_raster_{final_checksum[:16]}",
+                                "url": f"/api/outputs/{final_checksum}.png"
+                            }
+                        }
+                    }
+                )
+                return
+
+            # Analyzer path (runs Compositor)
             # Determine active / enabled artifacts for this run
             enabled_artifacts = [
                 name for name in algo.produced_in_analyze
@@ -284,16 +396,6 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                 else:
                     cached_data[name] = res[0]
                     cached_meta[name] = res[1]
-
-            # Setup active run ArtifactStore (with output_dir=None to prevent duplicate file writes!)
-            active_store = ArtifactStore(output_dir=None)
-            ctx = RenderContext(
-                input=asset,
-                params=params,
-                composition=None,
-                seed=int(payload.get("seed", 42)),
-                store=active_store,
-            )
 
             # Run analyze stage (with authoritative caching checks)
             if analyze_hit:
@@ -422,7 +524,7 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                                 "origin": l.pattern.coordinates.origin,
                                 "scale": l.pattern.coordinates.scale,
                                 "rotation_deg": l.pattern.coordinates.rotation_deg,
-                                "seed": l.pattern.coordinates.seed,
+                                "seed": l.pattern.coordinates.seed if l.pattern.coordinates.seed is not None else ctx.seed,
                             }
                         },
                         "threshold": l.threshold,

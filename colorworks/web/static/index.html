@@ -12,7 +12,7 @@
       <aside class="rail rail-left">
         <header class="brand">
           <h1>Colorworks</h1>
-          <span>Phase 1A</span>
+          <span>Phase 1B</span>
         </header>
 
         <section class="panel">
@@ -35,6 +35,21 @@
               <dd id="assetChecksum">-</dd>
             </div>
           </dl>
+        </section>
+
+        <section class="panel">
+          <h2>Presets</h2>
+          <select id="presetSelect" class="select" aria-label="Presets list">
+            <!-- Options dynamically populated -->
+          </select>
+          <div class="button-row" style="margin-bottom: 8px;">
+            <button id="loadPreset" type="button">Apply</button>
+            <button id="deletePreset" type="button" style="color: #e05638;">Delete</button>
+          </div>
+          <div style="border-top: 1px solid var(--line); padding-top: 8px;">
+            <input id="newPresetName" class="text-input" placeholder="New Preset Name" aria-label="New preset name" style="margin-bottom: 4px;">
+            <button id="savePreset" type="button" class="button" style="width: 100%;">Save Preset</button>
+          </div>
         </section>
 
         <section class="panel">
@@ -69,7 +84,7 @@
         </div>
       </section>
 
-      <aside class="rail rail-right">
+      <aside class="rail rail-right" style="overflow-y: auto;">
         <section class="panel">
           <h2>Pipeline</h2>
           <label class="control">
@@ -77,6 +92,7 @@
             <select id="pipelineSelect" class="select">
               <option value="ordered_bayer" selected>Phase 0: Bayer Dither</option>
               <option value="tonal_analyzer">Phase 1A: Tonal Wave</option>
+              <option value="floyd_steinberg">Phase 1B: Floyd-Steinberg</option>
             </select>
           </label>
         </section>
@@ -86,6 +102,20 @@
           <div id="dynamicControls" style="display: flex; flex-direction: column; gap: 12px;">
             <!-- Dynamically generated controls based on schema -->
           </div>
+        </section>
+
+        <section class="panel" id="layersPanel">
+          <h2>Layers</h2>
+          <div style="margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--line);">
+            <label class="control" style="display: grid; grid-template-columns: 1fr auto; align-items: center;">
+              <span>Paper Color</span>
+              <input type="color" id="paperColorPicker" value="#f4ebd9" style="width: 40px; height: 24px; border: none; cursor: pointer; padding: 0;">
+            </label>
+          </div>
+          <div id="layersList" style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 12px;">
+            <!-- Rendered dynamically -->
+          </div>
+          <button id="addLayerBtn" type="button" class="button" style="width: 100%;">Add Ink Layer</button>
         </section>
 
         <section class="panel">

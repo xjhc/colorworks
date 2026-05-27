@@ -292,3 +292,61 @@ input[type="range"] {
 .tab-btn:hover:not(.active) {
   background: rgba(18, 18, 18, 0.08);
 }
+
+/* Multi-layer UI Panel Styles */
+.layer-item {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+  background: #fffdf7;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+
+.layer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.layer-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.layer-actions button {
+  min-height: 24px;
+  padding: 2px 6px;
+  font-size: 11px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+}
+
+.layer-actions button:hover {
+  background: var(--line);
+  border-color: var(--muted);
+}
+
+.layer-actions button.btn-remove-layer {
+  color: #e05638;
+}
+
+.layer-actions button.btn-remove-layer:hover {
+  background: #fde8e4;
+  border-color: #e05638;
+}
+
+.layer-pattern-controls {
+  padding-left: 8px;
+  border-left: 2px solid var(--line);
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}

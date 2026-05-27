@@ -111,12 +111,146 @@ class Compositor:
 
         if pattern.kind == "wave":
             return self._generate_wave(pattern, width, height, run_seed)
+        elif pattern.kind == "ordered_dither":
+            return self._generate_ordered_dither(pattern, width, height, run_seed)
+        elif pattern.kind == "blue_noise":
+            return self._generate_blue_noise(pattern, width, height, run_seed)
+        elif pattern.kind == "maze":
+            return self._generate_maze(pattern, width, height, run_seed)
+        elif pattern.kind == "hatch":
+            return self._generate_hatch(pattern, width, height, run_seed)
         elif pattern.kind == "solid":
             # Solid ink pattern is just 0 threshold everywhere (always ink)
             return np.zeros((height, width), dtype=np.float32)
         else:
             # Fallback to solid
             return np.zeros((height, width), dtype=np.float32)
+
+    def _generate_ordered_dither(self, pattern: PatternSpec, width: int, height: int, run_seed: int) -> np.ndarray:
+        matrix_size = int(pattern.params.get("matrix_size", 8))
+        if matrix_size not in (2, 4, 8, 16):
+            matrix_size = 8
+        from colorworks.renderers.bayer import bayer_matrix
+        matrix = bayer_matrix(matrix_size)
+        repeats_y = (height + matrix_size - 1) // matrix_size
+        repeats_x = (width + matrix_size - 1) // matrix_size
+        P = np.tile(matrix, (repeats_y, repeats_x))[:height, :width]
+        return P
+
+    def _generate_blue_noise(self, pattern: PatternSpec, width: int, height: int, run_seed: int) -> np.ndarray:
+        size = int(pattern.params.get("size", 64))
+        if size not in (16, 32, 64, 128):
+            size = 64
+
+        seed = pattern.coordinates.seed if (pattern.coordinates and pattern.coordinates.seed is not None) else run_seed
+
+        # Seeded deterministic RNG
+        rng = np.random.default_rng(seed)
+        noise = rng.standard_normal((size, size))
+
+        # High pass filter via FFT
+        F = np.fft.fft2(noise)
+        F_shifted = np.fft.fftshift(F)
+
+        cy, cx = size // 2, size // 2
+        y, x = np.ogrid[-cy:size-cy, -cx:size-cx]
+        r2 = x*x + y*y
+        sigma = 1.5
+        mask = 1.0 - np.exp(-r2 / (2.0 * sigma**2))
+        F_shifted *= mask
+
+        filtered = np.real(np.fft.ifft2(np.fft.ifftshift(F_shifted)))
+
+        flat = filtered.ravel()
+        ranks = np.argsort(np.argsort(flat))
+        matrix = (ranks.reshape(size, size) + 0.5) / len(flat)
+
+        repeats_y = (height + size - 1) // size
+        repeats_x = (width + size - 1) // size
+        P = np.tile(matrix, (repeats_y, repeats_x))[:height, :width]
+        return P
+
+    def _generate_maze(self, pattern: PatternSpec, width: int, height: int, run_seed: int) -> np.ndarray:
+        scale = float(pattern.params.get("scale", 16.0))
+        line_width = float(pattern.params.get("line_width", 2.0))
+        if scale <= 1.0:
+            scale = 16.0
+
+        seed = pattern.coordinates.seed if (pattern.coordinates and pattern.coordinates.seed is not None) else run_seed
+
+        # Create grid of cell coordinates and pixel local coordinates
+        x = np.arange(width, dtype=np.float32)
+        y = np.arange(height, dtype=np.float32)
+        X, Y = np.meshgrid(x, y)
+
+        CX = (X / scale).astype(np.int32)
+        CY = (Y / scale).astype(np.int32)
+
+        u = X % scale
+        v = Y % scale
+
+        # Seeded cell decisions
+        hashes = (CX * 15991 + CY * 27763 + seed * 99187) % 2
+
+        # Arcs for hashes == 0
+        d1_0 = np.sqrt(u**2 + v**2)
+        d2_0 = np.sqrt((u - scale)**2 + (v - scale)**2)
+        dist_0 = np.minimum(np.abs(d1_0 - scale/2.0), np.abs(d2_0 - scale/2.0))
+
+        # Arcs for hashes == 1
+        d1_1 = np.sqrt((u - scale)**2 + v**2)
+        d2_1 = np.sqrt(u**2 + (v - scale)**2)
+        dist_1 = np.minimum(np.abs(d1_1 - scale/2.0), np.abs(d2_1 - scale/2.0))
+
+        dist = np.where(hashes == 0, dist_0, dist_1)
+
+        # Map distance to [0, 1] threshold where smaller values are ink center
+        # Tone-modulation: ink_mask = density_final >= P
+        # If density is low, only pixels with very low P (close to center) are inked.
+        # If line_width is larger, it broadens the ink region.
+        # We can map dist so that dist = 0 -> P = 0, and dist grows up to scale/2.
+        P = np.clip((dist - line_width / 2.0) / (scale / 2.0) + 0.5, 0.0, 1.0)
+        return P
+
+    def _generate_hatch(self, pattern: PatternSpec, width: int, height: int, run_seed: int) -> np.ndarray:
+        freq = float(pattern.params.get("frequency", 8.0))
+        angle_deg = float(pattern.params.get("angle_deg", 45.0))
+        phase = float(pattern.params.get("phase", 0.0))
+
+        coords = pattern.coordinates
+        space = coords.space
+        origin = coords.origin
+        scale = coords.scale
+        rotation_deg = coords.rotation_deg
+
+        # Total rotation
+        theta = np.radians(angle_deg + rotation_deg)
+
+        # Create grid
+        x = np.arange(width, dtype=np.float32)
+        y = np.arange(height, dtype=np.float32)
+        X, Y = np.meshgrid(x, y)
+
+        # Transform coordinates based on space
+        if space == "normalized":
+            X = X / float(width)
+            Y = Y / float(height)
+            f_scaled = freq * scale
+        else:
+            X = X - origin[0]
+            Y = Y - origin[1]
+            f_scaled = (freq / 100.0) * scale
+
+        # Calculate distance along wave direction
+        dist = X * np.cos(theta) + Y * np.sin(theta)
+
+        # Periodic triangle wave in range [0, 1]
+        phase_val = dist * f_scaled + phase
+        fractional_part = phase_val - np.floor(phase_val)
+        P = 2.0 * np.abs(fractional_part - 0.5)
+
+        return P
+
 
     def _generate_wave(self, pattern: PatternSpec, width: int, height: int, run_seed: int) -> np.ndarray:
         # Read parameters

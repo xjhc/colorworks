@@ -57,10 +57,11 @@ class LocalStore:
         self.assets_dir = root / "assets"
         self.outputs_dir = root / "outputs"
         self.recipes_dir = root / "recipes"
+        self.presets_dir = root / "presets"
         self.artifacts_dir = root / "artifacts"
         self.index_path = self.artifacts_dir / "index.json"
 
-        for directory in (self.assets_dir, self.outputs_dir, self.recipes_dir, self.artifacts_dir):
+        for directory in (self.assets_dir, self.outputs_dir, self.recipes_dir, self.presets_dir, self.artifacts_dir):
             directory.mkdir(parents=True, exist_ok=True)
 
         self._artifacts_index = {}
@@ -140,6 +141,82 @@ class LocalStore:
         if not path.exists():
             raise KeyError(f"unknown recipe_id: {recipe_id}")
         return load_recipe(path)
+
+    # Preset CRUD
+    def save_preset(self, data: dict[str, Any]) -> str:
+        preset_id = data.get("id")
+        if preset_id:
+            # Reject non-slug IDs
+            if not re.match(r"^[a-z0-9_-]+$", preset_id):
+                raise ValueError("Preset ID must only contain lowercase alphanumeric characters, dashes, and underscores")
+        else:
+            name = data.get("name", "untitled_preset")
+            # Generate a slug from name, replacing any non-alphanumeric/underscore/dash with dash
+            slugified_name = re.sub(r"[^a-zA-Z0-9_-]+", "-", name).strip("-").lower()
+            if not slugified_name:
+                slugified_name = "preset"
+            preset_id = f"{slugified_name}-{uuid.uuid4().hex[:8]}"
+
+        from colorworks.presets import BUILTIN_PRESETS
+        builtins = {p["id"] for p in BUILTIN_PRESETS}
+        if preset_id in builtins:
+            raise ValueError("Cannot overwrite a built-in preset")
+
+        path = (self.presets_dir / f"{preset_id}.json").resolve()
+        presets_dir_resolved = self.presets_dir.resolve()
+        if not path.is_relative_to(presets_dir_resolved) or path == presets_dir_resolved:
+            raise ValueError("Invalid preset ID path traversal attempt")
+
+        data["id"] = preset_id
+        path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return preset_id
+
+    def list_presets(self) -> list[dict[str, Any]]:
+        from colorworks.presets import BUILTIN_PRESETS
+        presets = []
+        for p in BUILTIN_PRESETS:
+            presets.append(dict(p))
+
+        for path in sorted(self.presets_dir.glob("*.json"), key=lambda p: p.stat().st_mtime):
+            try:
+                preset_data = json.loads(path.read_text(encoding="utf-8"))
+                preset_data["id"] = path.style.stem if hasattr(path, 'style') else path.stem
+                preset_data["is_builtin"] = False
+                presets.append(preset_data)
+            except Exception:
+                continue
+        return presets
+
+    def get_preset(self, preset_id: str) -> dict[str, Any]:
+        if not re.match(r"^[a-z0-9_-]+$", preset_id):
+            raise KeyError(f"unknown preset_id: {preset_id}")
+        from colorworks.presets import BUILTIN_PRESETS
+        for p in BUILTIN_PRESETS:
+            if p["id"] == preset_id:
+                return dict(p)
+
+        path = (self.presets_dir / f"{preset_id}.json").resolve()
+        presets_dir_resolved = self.presets_dir.resolve()
+        if not path.is_relative_to(presets_dir_resolved) or path == presets_dir_resolved or not path.exists():
+            raise KeyError(f"unknown preset_id: {preset_id}")
+        preset_data = json.loads(path.read_text(encoding="utf-8"))
+        preset_data["id"] = preset_id
+        preset_data["is_builtin"] = False
+        return preset_data
+
+    def delete_preset(self, preset_id: str) -> None:
+        if not re.match(r"^[a-z0-9_-]+$", preset_id):
+            raise KeyError(f"unknown preset_id: {preset_id}")
+        from colorworks.presets import BUILTIN_PRESETS
+        builtins = {p["id"] for p in BUILTIN_PRESETS}
+        if preset_id in builtins:
+            raise ValueError("Cannot delete a built-in preset")
+
+        path = (self.presets_dir / f"{preset_id}.json").resolve()
+        presets_dir_resolved = self.presets_dir.resolve()
+        if not path.is_relative_to(presets_dir_resolved) or path == presets_dir_resolved or not path.exists():
+            raise KeyError(f"unknown preset_id: {preset_id}")
+        path.unlink()
 
     def _asset_record_path(self, asset_id: str) -> Path:
         return self.assets_dir / f"{asset_id}.json"
