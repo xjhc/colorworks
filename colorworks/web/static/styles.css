@@ -269,3 +269,26 @@ input[type="range"] {
     max-height: 58vh;
   }
 }
+
+/* Tabs */
+.tab-btn {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 4px 10px;
+  font-size: 13px;
+  min-height: 28px;
+  transition: all 0.15s ease;
+}
+
+.tab-btn.active {
+  background: var(--ink) !important;
+  color: var(--paper) !important;
+  border-color: var(--ink) !important;
+}
+
+.tab-btn:hover:not(.active) {
+  background: rgba(18, 18, 18, 0.08);
+}
