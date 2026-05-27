@@ -288,79 +288,74 @@ def test_server_presets_and_cache_reuse(run_server) -> None:
         asset_info = json.loads(resp.read().decode("utf-8"))["asset"]
     asset_id = asset_info["id"]
     
-    # Mock TonalAnalyzer.analyze
-    algo = registry.get("tonal_analyzer")
-    original_analyze = algo.analyze
-    algo.analyze = MagicMock(side_effect=original_analyze)
-    
-    try:
-        # Get presets
-        req_presets = urllib.request.Request(f"{base_url}/api/presets")
-        with urllib.request.urlopen(req_presets) as resp:
-            presets_payload = json.loads(resp.read().decode("utf-8"))["presets"]
-        
-        wave_preset = next(p for p in presets_payload if p["id"] == "wave_halftone")
-        maze_preset = next(p for p in presets_payload if p["id"] == "maze_halftone")
-        hatch_preset = next(p for p in presets_payload if p["id"] == "hatch")
-        
-        # Render Wave Halftone Preset
-        render_payload_1 = {
-            "asset_id": asset_id,
-            "renderer_id": "tonal_analyzer",
-            "params": wave_preset["params"],
-            "composition": wave_preset["composition"],
-            "seed": 42
-        }
-        req_render_1 = urllib.request.Request(
-            f"{base_url}/api/render",
-            data=json.dumps(render_payload_1).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req_render_1) as resp:
-            res1 = json.loads(resp.read().decode("utf-8"))
-            
-        # Render Maze Halftone Preset
-        render_payload_2 = {
-            "asset_id": asset_id,
-            "renderer_id": "tonal_analyzer",
-            "params": maze_preset["params"],
-            "composition": maze_preset["composition"],
-            "seed": 42
-        }
-        req_render_2 = urllib.request.Request(
-            f"{base_url}/api/render",
-            data=json.dumps(render_payload_2).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req_render_2) as resp:
-            res2 = json.loads(resp.read().decode("utf-8"))
-            
-        # Render Hatch Preset
-        render_payload_3 = {
-            "asset_id": asset_id,
-            "renderer_id": "tonal_analyzer",
-            "params": hatch_preset["params"],
-            "composition": hatch_preset["composition"],
-            "seed": 42
-        }
-        req_render_3 = urllib.request.Request(
-            f"{base_url}/api/render",
-            data=json.dumps(render_payload_3).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req_render_3) as resp:
-            res3 = json.loads(resp.read().decode("utf-8"))
-            
-        # Verification:
-        # 1. Output checksums are different
-        assert res1["output"]["checksum"] != res2["output"]["checksum"]
-        assert res2["output"]["checksum"] != res3["output"]["checksum"]
-        assert res1["output"]["checksum"] != res3["output"]["checksum"]
-        
-        # 2. TonalAnalyzer.analyze called EXACTLY once (proving caching works across presets)
-        assert algo.analyze.call_count == 1
-    finally:
-        algo.analyze = original_analyze
+    # Get presets
+    req_presets = urllib.request.Request(f"{base_url}/api/presets")
+    with urllib.request.urlopen(req_presets) as resp:
+        presets_payload = json.loads(resp.read().decode("utf-8"))["presets"]
+
+    wave_preset = next(p for p in presets_payload if p["id"] == "wave_halftone")
+    maze_preset = next(p for p in presets_payload if p["id"] == "maze_halftone")
+    hatch_preset = next(p for p in presets_payload if p["id"] == "hatch")
+
+    # Render Wave Halftone Preset
+    render_payload_1 = {
+        "asset_id": asset_id,
+        "renderer_id": "tonal_analyzer",
+        "params": wave_preset["params"],
+        "composition": wave_preset["composition"],
+        "seed": 42
+    }
+    req_render_1 = urllib.request.Request(
+        f"{base_url}/api/render",
+        data=json.dumps(render_payload_1).encode("utf-8"),
+        headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req_render_1) as resp:
+        res1 = json.loads(resp.read().decode("utf-8"))
+
+    # Render Maze Halftone Preset
+    render_payload_2 = {
+        "asset_id": asset_id,
+        "renderer_id": "tonal_analyzer",
+        "params": maze_preset["params"],
+        "composition": maze_preset["composition"],
+        "seed": 42
+    }
+    req_render_2 = urllib.request.Request(
+        f"{base_url}/api/render",
+        data=json.dumps(render_payload_2).encode("utf-8"),
+        headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req_render_2) as resp:
+        res2 = json.loads(resp.read().decode("utf-8"))
+
+    # Render Hatch Preset
+    render_payload_3 = {
+        "asset_id": asset_id,
+        "renderer_id": "tonal_analyzer",
+        "params": hatch_preset["params"],
+        "composition": hatch_preset["composition"],
+        "seed": 42
+    }
+    req_render_3 = urllib.request.Request(
+        f"{base_url}/api/render",
+        data=json.dumps(render_payload_3).encode("utf-8"),
+        headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req_render_3) as resp:
+        res3 = json.loads(resp.read().decode("utf-8"))
+
+    # Three different compositions → three different final outputs
+    assert res1["output"]["checksum"] != res2["output"]["checksum"]
+    assert res2["output"]["checksum"] != res3["output"]["checksum"]
+    assert res1["output"]["checksum"] != res3["output"]["checksum"]
+
+    # All three presets share the same analysis params → tone_map artifact
+    # should be reused from cache (same ID) across all three renders
+    assert res1["artifacts"]["tone_map"]["id"] == res2["artifacts"]["tone_map"]["id"], \
+        "tone_map artifact should be reused from cache across composition-only preset changes"
+    assert res1["artifacts"]["tone_map"]["id"] == res3["artifacts"]["tone_map"]["id"], \
+        "tone_map artifact should be reused from cache across composition-only preset changes"
 
 def test_server_floyd_steinberg_bypasses_compositor(run_server) -> None:
     base_url, store = run_server
@@ -506,6 +501,9 @@ def test_server_different_seeds_invalidate_cache(run_server) -> None:
     with urllib.request.urlopen(req_42_again) as resp:
         res_42_again = json.loads(resp.read().decode("utf-8"))
 
-    # Assert output checksum is identical (cache hit)
+    # Identical artifact ID (not just checksum) proves the cache was hit —
+    # a fresh computation always produces a new artifact ID even if deterministic
     assert res_42["output"]["checksum"] == res_42_again["output"]["checksum"]
+    assert res_42["artifacts"]["tone_map"]["id"] == res_42_again["artifacts"]["tone_map"]["id"], \
+        "tone_map artifact ID must match on cache hit (same ID, not just same checksum)"
 

@@ -531,8 +531,8 @@ def test_cancel_emits_cancelled_no_history_warm_state_available(run_server) -> N
     assert run_status is not None
 
     if run_status["status"] == "cancelled":
-        # Verify warm-start state was saved for the session
-        warm = server.scheduler.get_warm_state(session)
+        # Verify warm-start state was saved for this session+asset+algorithm
+        warm = server.scheduler.get_warm_state(session, asset["id"], "cvt_stippling")
         assert warm is not None, "Expected warm-start state after cancellation"
         assert warm.algorithm_id == "cvt_stippling"
 

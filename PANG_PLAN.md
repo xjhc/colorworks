@@ -56,7 +56,7 @@ class PangHalftoning(IterativeAlgorithm):
 | w_tone | float | 1.0 | tone-fidelity weight |
 | w_orient | float | 0.5 | orientation-alignment weight |
 | ssim_window | int | 7 | Gaussian neighbourhood radius |
-| orientation_source | str | "orientation_field" | artifact name |
+| orientation_source | str | "internal" | **internal only for now** — computes orientation field from the input image via structure tensor; other values reserved for future cross-run artifact borrowing (Phase 4+) |
 
 ## Acceptance checks (for whoever implements it)
 
@@ -70,13 +70,14 @@ class PangHalftoning(IterativeAlgorithm):
 
 ## Dependencies
 
-- Requires Phase 2 `StructureAnalyzer` or `TonalAnalyzer` to have run first
-  and published `orientation_field` / `tone_map` to the ArtifactStore.
-- The server endpoint should accept `{"renderer_id": "pang_halftoning",
-  "orientation_run_id": "<preview_run_id>"}` to borrow artifacts from a prior
-  analyzer run, OR the algorithm can run the tonal analysis internally (HYBRID
-  role — revisit §16 open question 6 in DESIGN.md).
-- No new dependencies; uses only numpy + PIL.
+- **Phase 3.5 implementation is self-contained.** The algorithm computes its
+  own tone map and structure-tensor orientation field from the input image,
+  reusing Phase 2 helpers (`to_gray`, `gaussian_blur`, `convolve2d_nearest`).
+  No prior analyzer run is required.
+- Cross-run artifact borrowing (e.g. `orientation_run_id`) is reserved for a
+  future phase (Phase 4+). The `orientation_source` parameter currently only
+  accepts `"internal"` (or its aliases); other values raise `ValueError`.
+- No new package dependencies; uses only numpy + PIL.
 
 ## Effort estimate
 

@@ -51,6 +51,7 @@ import colorworks.algorithms.pattern_catalog
 import colorworks.algorithms.floyd_steinberg
 import colorworks.algorithms.structure_analyzer
 import colorworks.algorithms.cvt_stippling
+import colorworks.algorithms.pang_halftoning
 
 STATIC_DIR = Path(__file__).with_name("static")
 
@@ -414,8 +415,10 @@ class ColorworksHandler(BaseHTTPRequestHandler):
 
         algo, ctx = self._build_run_context(payload)
 
-        # Check warm-start availability
-        warm_state = self.server.scheduler.get_warm_state(session_id)
+        # Check warm-start availability; key on session+asset+algorithm
+        warm_state = self.server.scheduler.get_warm_state(
+            session_id, ctx.input.id, renderer_id
+        )
         if warm_state and hasattr(algo, "can_warm_start"):
             if algo.can_warm_start(warm_state, ctx.params):
                 ctx.warm_start = warm_state

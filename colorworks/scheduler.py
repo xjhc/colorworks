@@ -41,8 +41,8 @@ class RunScheduler:
         self._subscribers: dict[str, list[Queue]] = {}
         # run_id → ordered list of event dicts (for late subscribers)
         self._history: dict[str, list[dict]] = {}
-        # session_id → WarmStartState
-        self._warm_states: dict[str, WarmStartState] = {}
+        # (session_id, asset_id, algorithm_id) → WarmStartState
+        self._warm_states: dict[tuple[str, str, str], WarmStartState] = {}
         # run_id → CancelToken
         self._cancel_tokens: dict[str, CancelToken] = {}
         # run_id → (ctx, artifact checksums) for promotion
@@ -147,9 +147,11 @@ class RunScheduler:
             return None
         return r.to_dict()
 
-    def get_warm_state(self, session_id: str) -> WarmStartState | None:
+    def get_warm_state(
+        self, session_id: str, asset_id: str, algorithm_id: str
+    ) -> WarmStartState | None:
         with self._lock:
-            return self._warm_states.get(session_id)
+            return self._warm_states.get((session_id, asset_id, algorithm_id))
 
     def is_exportable(self, run_id: str) -> bool:
         """True only if the run completed non-partially (safe to export)."""
@@ -204,7 +206,8 @@ class RunScheduler:
                     run._partial = True
                     if session_id and progress.result and progress.result.warm_state:
                         with self._lock:
-                            self._warm_states[session_id] = progress.result.warm_state
+                            key = (session_id, run.asset_id, run.algorithm_id)
+                            self._warm_states[key] = progress.result.warm_state
 
                 elif progress.kind == "failed":
                     run.status = RunStatus.FAILED

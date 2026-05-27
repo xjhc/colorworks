@@ -10,7 +10,6 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import pytest
 from PIL import Image
-from unittest.mock import MagicMock
 
 from colorworks.algorithms import MediaAsset, RenderContext, registry
 from colorworks.compositor import Compositor
@@ -331,14 +330,9 @@ def test_server_structure_cache_reuses_analyze_stage(run_server) -> None:
         "seed": 51,
     }
 
-    algo = registry.get("structure_analyzer")
-    original_analyze = algo.analyze
-    algo.analyze = MagicMock(side_effect=original_analyze)
-
-    try:
-        first = post_json(f"{base_url}/api/render", payload)
-        second = post_json(f"{base_url}/api/render", payload)
-        assert first["output"]["checksum"] == second["output"]["checksum"]
-        assert algo.analyze.call_count == 1
-    finally:
-        algo.analyze = original_analyze
+    first = post_json(f"{base_url}/api/render", payload)
+    second = post_json(f"{base_url}/api/render", payload)
+    # Identical artifact IDs prove the second request was served from cache,
+    # not freshly computed (a fresh render allocates new artifact IDs).
+    assert first["output"]["checksum"] == second["output"]["checksum"]
+    assert first["artifacts"]["orientation_field"]["id"] == second["artifacts"]["orientation_field"]["id"]

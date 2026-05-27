@@ -212,15 +212,17 @@ class AlgorithmRegistry:
         self._pattern_generators: dict[str, Any] = {}
 
     def register(self, algorithm: Any) -> None:
-        self._algorithms[algorithm.definition.id] = algorithm
+        # Store the class, not the instance, so each get() call returns a
+        # fresh object. Prevents concurrent runs from sharing mutable state.
+        self._algorithms[algorithm.definition.id] = type(algorithm)
 
     def get(self, algorithm_id: str) -> Any:
         if algorithm_id not in self._algorithms:
             raise KeyError(f"Algorithm {algorithm_id} not registered")
-        return self._algorithms[algorithm_id]
+        return self._algorithms[algorithm_id]()
 
     def list_algorithms(self) -> list[Any]:
-        return list(self._algorithms.values())
+        return [cls() for cls in self._algorithms.values()]
 
     def register_pattern(self, pattern: PatternKindDef) -> None:
         self._patterns[pattern.kind] = pattern
