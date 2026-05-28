@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import io
 import json
+import threading
+import urllib.request
+import urllib.error
 from pathlib import Path
+import pytest
 import numpy as np
 from PIL import Image
 
 from colorworks.algorithms.fixtures import FIXTURES
 from colorworks.algorithms.comparison_harness import run_harness, compute_file_sha256
+from colorworks.web.server import ColorworksServer
+from colorworks.storage import LocalStore
 
 
 def test_fixtures_deterministic() -> None:
@@ -75,11 +82,19 @@ def test_comparison_harness_isolation_and_manifest(tmp_path: Path) -> None:
         assert "algorithm_id" in entry
         assert "preset_id" in entry
         assert "params" in entry
+        assert "source_path" in entry
+        assert "source_url" in entry
         assert "output_path" in entry
+        assert "output_url" in entry
         assert "checksum" in entry
+        assert "sha256" in entry
         assert "runtime_ms" in entry
         assert "dimensions" in entry
+        assert "width" in entry
+        assert "height" in entry
         assert "metrics" in entry
+        assert "mse" in entry
+        assert "mean_intensity" in entry
 
         fixture_name = entry["fixture_name"]
         fixture_checksum = entry["fixture_checksum"]
@@ -108,11 +123,14 @@ def test_comparison_harness_isolation_and_manifest(tmp_path: Path) -> None:
         else:
             assert dims == [64, 64]
 
-        # Verify output path is isolated under tmp_path
-        out_path_str = entry["output_path"]
-        out_path = Path(out_path_str)
+        # Verify output path and source path are isolated under tmp_path
+        out_path = Path(entry["output_path"])
         assert out_path.exists()
         assert out_path.parent.resolve() == tmp_path.resolve()
+
+        source_path = Path(entry["source_path"])
+        assert source_path.exists()
+        assert source_path.parent.resolve() == tmp_path.resolve()
 
         # Checksum check
         checksum = entry["checksum"]
@@ -141,3 +159,86 @@ def test_comparison_harness_isolation_and_manifest(tmp_path: Path) -> None:
 
     # Check that we covered all 56 combinations
     assert len(seen_combinations) == 56
+
+
+def test_comparison_server_endpoints(tmp_path: Path) -> None:
+    # Set up server and directory
+    store = LocalStore(tmp_path)
+    server = ColorworksServer(("127.0.0.1", 0), store)
+    port = server.server_port
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+
+    base_url = f"http://127.0.0.1:{port}"
+
+    try:
+        # Run comparison harness to generate files in store comparison latest directory
+        comp_dir = tmp_path / "comparison" / "latest"
+        run_harness(output_dir=comp_dir)
+
+        # Test 1: Fetch manifest via endpoint
+        manifest_url = f"{base_url}/api/comparison/manifest"
+        with urllib.request.urlopen(manifest_url) as r:
+            assert r.status == 200
+            manifest_data = json.loads(r.read())
+
+        assert isinstance(manifest_data, list)
+        assert len(manifest_data) == 56
+
+        # Check entries
+        entry = manifest_data[0]
+        assert "fixture_name" in entry
+        assert "fixture_checksum" in entry
+        assert "run_id" in entry
+        assert "kind" in entry
+        assert "algorithm_id" in entry
+        assert "preset_id" in entry
+        assert "params" in entry
+        assert "source_path" in entry
+        assert "source_url" in entry
+        assert "output_path" in entry
+        assert "output_url" in entry
+        assert "checksum" in entry
+        assert "sha256" in entry
+        assert "runtime_ms" in entry
+        assert "dimensions" in entry
+        assert "width" in entry
+        assert "height" in entry
+        assert "metrics" in entry
+        assert "mse" in entry
+        assert "mean_intensity" in entry
+
+        # Test 2: Prove output and source images are reachable via server
+        for name in ["portrait", "landscape", "icon"]:
+            source_img_url = f"{base_url}/api/comparison/images/source_{name}.png"
+            with urllib.request.urlopen(source_img_url) as r:
+                assert r.status == 200
+                img_data = r.read()
+                assert len(img_data) > 0
+                img = Image.open(io.BytesIO(img_data))
+                assert img.format == "PNG"
+
+            output_img_url = f"{base_url}/api/comparison/images/{name}_floyd_steinberg.png"
+            with urllib.request.urlopen(output_img_url) as r:
+                assert r.status == 200
+                img_data = r.read()
+                assert len(img_data) > 0
+                img = Image.open(io.BytesIO(img_data))
+                assert img.format == "PNG"
+
+        # Test 3: Path traversal rejection
+        bad_urls = [
+            f"{base_url}/api/comparison/images/../../artifacts/index.json",
+            f"{base_url}/api/comparison/images/..%2F..%2Fartifacts%2Findex.json",
+            f"{base_url}/api/comparison/images/subdir/../../manifest.json",
+            f"{base_url}/api/comparison/images/..%2F%2E%2E%2F..%2Fetc%2Fpasswd",
+        ]
+        for bad_url in bad_urls:
+            with pytest.raises(urllib.error.HTTPError) as exc_info:
+                urllib.request.urlopen(bad_url)
+            assert exc_info.value.code == 404
+
+    finally:
+        server.shutdown()
+        server.server_close()
+        t.join(timeout=3)

@@ -148,6 +148,10 @@ def run_harness(output_dir: Path | str | None = None) -> str:
         img.save(buf, format="PNG")
         fixture_checksum = hashlib.sha256(buf.getvalue()).hexdigest()
 
+        # Save source fixture image under output_dir
+        source_path = output_dir / f"source_{fixture_name}.png"
+        img.save(source_path, format="PNG")
+
         substrate = RasterGrid(width, height)
         asset = MediaAsset(
             id=f"fixture_{fixture_name}",
@@ -263,14 +267,22 @@ def run_harness(output_dir: Path | str | None = None) -> str:
                 "algorithm_id": "tonal_analyzer" if is_preset else run_id,
                 "preset_id": run_id if is_preset else None,
                 "params": params,
+                "source_path": str(source_path),
+                "source_url": f"/api/comparison/images/source_{fixture_name}.png",
                 "output_path": str(out_path),
+                "output_url": f"/api/comparison/images/{fixture_name}_{run_id}.png",
                 "checksum": out_checksum,
+                "sha256": out_checksum,
                 "runtime_ms": elapsed_ms,
                 "dimensions": [width, height],
+                "width": width,
+                "height": height,
                 "metrics": {
                     "mse": float(mse),
                     "mean_intensity": float(mean_intensity),
-                }
+                },
+                "mse": float(mse),
+                "mean_intensity": float(mean_intensity),
             })
 
         # Generate Markdown Table for this fixture

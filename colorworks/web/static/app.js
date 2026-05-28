@@ -1256,6 +1256,273 @@ async function exportSvg() {
   setStatus("SVG exported");
 }
 
+// Gallery state and functions
+const galleryState = {
+  manifest: [],
+  selectedRuns: {} // fixture_name -> selected run object
+};
+
+function enterGallery() {
+  document.querySelector(".rail-left").style.display = "none";
+  document.querySelector(".workspace").style.display = "none";
+  document.querySelector(".rail-right").style.display = "none";
+  const gall = document.getElementById("galleryView");
+  gall.style.display = "flex";
+  document.querySelector(".app-shell").style.gridTemplateColumns = "1fr";
+  loadGallery();
+}
+
+function exitGallery() {
+  document.querySelector(".rail-left").style.display = "flex";
+  document.querySelector(".workspace").style.display = "grid";
+  document.querySelector(".rail-right").style.display = "flex";
+  const gall = document.getElementById("galleryView");
+  gall.style.display = "none";
+  document.querySelector(".app-shell").style.gridTemplateColumns = "minmax(220px, 280px) minmax(0, 1fr) minmax(230px, 300px)";
+}
+
+async function loadGallery() {
+  const content = document.getElementById("galleryContent");
+  content.innerHTML = '<div style="padding: 40px; text-align: center; font-style: italic; color: var(--muted);">Loading manifest and outputs...</div>';
+
+  try {
+    const res = await fetch("/api/comparison/manifest");
+    if (!res.ok) {
+      throw new Error(`Failed to load manifest: ${res.statusText}`);
+    }
+    const manifest = await res.json();
+    galleryState.manifest = manifest;
+
+    manifest.forEach(run => {
+      const fix = run.fixture_name;
+      if (!galleryState.selectedRuns[fix]) {
+        galleryState.selectedRuns[fix] = run;
+      } else {
+        const exists = manifest.some(r => r.fixture_name === fix && r.run_id === galleryState.selectedRuns[fix].run_id);
+        if (!exists) {
+          galleryState.selectedRuns[fix] = run;
+        }
+      }
+    });
+
+    populateFixtureFilter(manifest);
+    renderGallery();
+  } catch (err) {
+    content.innerHTML = `<div style="padding: 40px; text-align: center; color: #e05638; font-weight: 500;">
+      Error loading gallery: ${err.message}<br>
+      <span style="font-size: 12px; color: var(--muted); font-weight: normal; margin-top: 8px; display: inline-block;">
+        Ensure comparison harness has run: <code>python -m colorworks.algorithms.comparison_harness</code>
+      </span>
+    </div>`;
+  }
+}
+
+function populateFixtureFilter(manifest) {
+  const filter = document.getElementById("galleryFixtureFilter");
+  if (!filter) return;
+  const currentVal = filter.value;
+  const fixtures = [...new Set(manifest.map(r => r.fixture_name))];
+
+  filter.innerHTML = '<option value="all">All Fixtures</option>';
+  fixtures.forEach(fix => {
+    const opt = document.createElement("option");
+    opt.value = fix;
+    opt.textContent = fix;
+    filter.appendChild(opt);
+  });
+
+  if (fixtures.includes(currentVal)) {
+    filter.value = currentVal;
+  } else {
+    filter.value = "all";
+  }
+}
+
+function renderGallery() {
+  const content = document.getElementById("galleryContent");
+  if (!content) return;
+  const fixtureFilter = document.getElementById("galleryFixtureFilter").value;
+  const kindFilter = document.getElementById("galleryKindFilter").value;
+
+  let filtered = galleryState.manifest;
+  if (fixtureFilter !== "all") {
+    filtered = filtered.filter(r => r.fixture_name === fixtureFilter);
+  }
+
+  const grouped = {};
+  filtered.forEach(run => {
+    const fix = run.fixture_name;
+    if (!grouped[fix]) grouped[fix] = [];
+    grouped[fix].push(run);
+  });
+
+  content.innerHTML = "";
+  const fixturesToRender = Object.keys(grouped);
+  if (fixturesToRender.length === 0) {
+    content.innerHTML = '<div style="padding: 40px; text-align: center; font-style: italic; color: var(--muted);">No matching comparison outputs found.</div>';
+    return;
+  }
+
+  fixturesToRender.forEach(fixtureName => {
+    const runs = grouped[fixtureName];
+    let displayRuns = runs;
+    if (kindFilter !== "all") {
+      displayRuns = runs.filter(r => r.kind === kindFilter);
+    }
+
+    let selectedRun = galleryState.selectedRuns[fixtureName];
+    if (displayRuns.length > 0 && !displayRuns.some(r => r.run_id === selectedRun.run_id)) {
+      selectedRun = displayRuns[0];
+    }
+
+    const fixtureCard = document.createElement("div");
+    fixtureCard.className = "fixture-comparison-card";
+    fixtureCard.style.cssText = "border: 1px solid var(--line); border-radius: 8px; background: #fffdf7; overflow: hidden; display: flex; flex-direction: column;";
+
+    const header = document.createElement("div");
+    header.style.cssText = "background: var(--line); padding: 10px 16px; display: flex; justify-content: space-between; align-items: center;";
+    header.innerHTML = `
+      <h3 style="margin: 0; font-size: 15px; font-weight: 700; text-transform: capitalize; color: var(--ink);">Fixture: ${fixtureName}</h3>
+      <span style="font-size: 11px; color: var(--muted); font-family: monospace;">Source Checksum: ${runs[0].fixture_checksum.slice(0, 12)}...</span>
+    `;
+    fixtureCard.appendChild(header);
+
+    const body = document.createElement("div");
+    body.style.cssText = "display: grid; grid-template-columns: 320px 1fr; min-height: 380px;";
+
+    const comparePane = document.createElement("div");
+    comparePane.style.cssText = "border-right: 1px solid var(--line); padding: 16px; display: flex; flex-direction: column; gap: 12px; background: #fffdf7;";
+
+    const imagesContainer = document.createElement("div");
+    imagesContainer.style.cssText = "display: flex; gap: 8px; height: 150px;";
+
+    const sourceBox = document.createElement("div");
+    sourceBox.style.cssText = "flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 4px; padding: 4px; background: var(--panel); position: relative;";
+    sourceBox.innerHTML = `
+      <span style="position: absolute; top: 4px; left: 4px; font-size: 8px; background: var(--muted); color: var(--paper); padding: 1px 4px; border-radius: 2px; font-weight: 600;">SOURCE</span>
+      <img src="${runs[0].source_url}" style="max-height: 110px; max-width: 100%; object-fit: contain; image-rendering: pixelated; border: 1px solid rgba(0,0,0,0.05);">
+      <span style="font-size: 10px; margin-top: 4px; font-weight: 600; color: var(--muted);">${runs[0].width}x${runs[0].height}</span>
+    `;
+    imagesContainer.appendChild(sourceBox);
+
+    const outputBox = document.createElement("div");
+    outputBox.style.cssText = "flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 4px; padding: 4px; background: var(--panel); position: relative;";
+
+    const comparedImg = document.createElement("img");
+    comparedImg.style.cssText = "max-height: 110px; max-width: 100%; object-fit: contain; image-rendering: pixelated; border: 1px solid rgba(0,0,0,0.05);";
+    if (selectedRun) {
+      comparedImg.src = selectedRun.output_url;
+    }
+
+    const comparedRes = document.createElement("span");
+    comparedRes.style.cssText = "font-size: 10px; margin-top: 4px; font-weight: 600; color: var(--muted);";
+    if (selectedRun) {
+      comparedRes.textContent = `${selectedRun.width}x${selectedRun.height}`;
+    }
+
+    outputBox.innerHTML = `<span style="position: absolute; top: 4px; left: 4px; font-size: 8px; background: var(--accent); color: var(--paper); padding: 1px 4px; border-radius: 2px; font-weight: 600;">COMPARED</span>`;
+    outputBox.appendChild(comparedImg);
+    outputBox.appendChild(comparedRes);
+    imagesContainer.appendChild(outputBox);
+    comparePane.appendChild(imagesContainer);
+
+    const details = document.createElement("div");
+    details.style.cssText = "flex: 1; border-top: 1px solid var(--line); padding-top: 12px; font-size: 12px; display: flex; flex-direction: column; gap: 8px;";
+
+    function populateDetails(run) {
+      if (!run) {
+        details.innerHTML = '<div style="font-style: italic; color: var(--muted);">No output selected.</div>';
+        return;
+      }
+      const isPreset = run.kind === "preset";
+      const kindLabel = isPreset ? "Preset" : "Algorithm";
+      const kindColor = isPreset ? "#0f6f78" : "#121212";
+
+      details.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: baseline;">
+          <span style="font-weight: 700; font-size: 13px; color: var(--ink);">${run.preset_id || run.algorithm_id}</span>
+          <span style="font-size: 10px; font-weight: 700; color: white; background: ${kindColor}; padding: 1px 6px; border-radius: 10px; text-transform: uppercase;">${kindLabel}</span>
+        </div>
+        <div style="font-size: 11px; color: var(--muted); margin-bottom: 4px;">
+          Renderer: <code>${run.algorithm_id}</code>
+        </div>
+        <dl style="margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; line-height: 1.4;">
+          <dt style="color: var(--muted);">Runtime:</dt>
+          <dd style="margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums;">${run.runtime_ms.toFixed(2)} ms</dd>
+
+          <dt style="color: var(--muted);">MSE:</dt>
+          <dd style="margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; font-family: monospace;">${run.metrics.mse.toFixed(5)}</dd>
+
+          <dt style="color: var(--muted);">Mean Intensity:</dt>
+          <dd style="margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; font-family: monospace;">${run.metrics.mean_intensity.toFixed(4)}</dd>
+
+          <dt style="color: var(--muted); align-self: center;">Checksum:</dt>
+          <dd style="margin: 0; font-family: monospace; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px; text-align: right;" title="${run.checksum}">${run.checksum.slice(0, 16)}...</dd>
+        </dl>
+      `;
+    }
+
+    populateDetails(selectedRun);
+    comparePane.appendChild(details);
+    body.appendChild(comparePane);
+
+    const gridPane = document.createElement("div");
+    gridPane.style.cssText = "padding: 16px; overflow-y: auto; background: #faf8f1;";
+
+    const grid = document.createElement("div");
+    grid.style.cssText = "display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 12px;";
+
+    displayRuns.forEach(run => {
+      const isSelected = selectedRun && run.run_id === selectedRun.run_id;
+      const thumb = document.createElement("div");
+      thumb.style.cssText = `
+        border: 1px solid ${isSelected ? "var(--accent)" : "var(--line)"};
+        border-radius: 6px;
+        padding: 8px;
+        background: #fffdf7;
+        cursor: pointer;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        box-shadow: ${isSelected ? "0 0 0 1px var(--accent)" : "none"};
+        transition: all 0.15s ease;
+      `;
+
+      thumb.innerHTML = `
+        <img src="${run.output_url}" style="height: 60px; max-width: 100%; object-fit: contain; image-rendering: pixelated; border: 1px solid rgba(0,0,0,0.05);">
+        <span style="font-size: 11px; font-weight: 600; text-align: center; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; width: 100%; color: var(--ink);" title="${run.preset_id || run.algorithm_id}">
+          ${run.preset_id || run.algorithm_id}
+        </span>
+        <span style="font-size: 9px; color: var(--muted); font-variant-numeric: tabular-nums;">
+          MSE: ${run.metrics.mse.toFixed(4)}
+        </span>
+      `;
+
+      thumb.addEventListener("click", () => {
+        galleryState.selectedRuns[fixtureName] = run;
+        comparedImg.src = run.output_url;
+        comparedRes.textContent = `${run.width}x${run.height}`;
+        populateDetails(run);
+
+        Array.from(grid.children).forEach(child => {
+          child.style.borderColor = "var(--line)";
+          child.style.boxShadow = "none";
+        });
+        thumb.style.borderColor = "var(--accent)";
+        thumb.style.boxShadow = "0 0 0 1px var(--accent)";
+      });
+
+      grid.appendChild(thumb);
+    });
+
+    gridPane.appendChild(grid);
+    body.appendChild(gridPane);
+    fixtureCard.appendChild(body);
+    content.appendChild(fixtureCard);
+  });
+}
+
 // Fetch schemas and setup initial application state
 async function init() {
   try {
@@ -1309,6 +1576,19 @@ async function init() {
       scheduleRender();
     });
   }
+
+  // Gallery Navigation listeners
+  const enterGalleryBtn = document.querySelector("#enterGalleryBtn");
+  const exitGalleryBtn = document.querySelector("#exitGalleryBtn");
+  const refreshGalleryBtn = document.querySelector("#refreshGalleryBtn");
+  const fixtureFilter = document.querySelector("#galleryFixtureFilter");
+  const kindFilter = document.querySelector("#galleryKindFilter");
+
+  if (enterGalleryBtn) enterGalleryBtn.addEventListener("click", enterGallery);
+  if (exitGalleryBtn) exitGalleryBtn.addEventListener("click", exitGallery);
+  if (refreshGalleryBtn) refreshGalleryBtn.addEventListener("click", loadGallery);
+  if (fixtureFilter) fixtureFilter.addEventListener("change", renderGallery);
+  if (kindFilter) kindFilter.addEventListener("change", renderGallery);
 
   // Default composition
   state.composition = defaultWaveComposition();

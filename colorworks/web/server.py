@@ -240,6 +240,27 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                 preset_id = route.rsplit("/", 1)[-1]
                 preset = self.server.store.get_preset(preset_id)
                 self._send_json(preset)
+            elif route == "/api/comparison/manifest":
+                manifest_path = self.server.store.root / "comparison" / "latest" / "manifest.json"
+                if not manifest_path.exists():
+                    self._send_error(HTTPStatus.NOT_FOUND, "comparison manifest not found")
+                else:
+                    try:
+                        with manifest_path.open("r", encoding="utf-8") as f:
+                            manifest_data = json.load(f)
+                        self._send_json(manifest_data)
+                    except Exception as e:
+                        self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"failed to load manifest: {e}")
+            elif route.startswith("/api/comparison/images/"):
+                filename = route.removeprefix("/api/comparison/images/")
+                # Safe unquoting for path resolution
+                filename = unquote(filename)
+                # Ensure no folder separator in the filename itself to prevent path traversal
+                if "/" in filename or "\\" in filename or filename == ".." or filename == ".":
+                    self._send_error(HTTPStatus.NOT_FOUND, "not found")
+                else:
+                    path = (self.server.store.root / "comparison" / "latest" / filename).resolve()
+                    self._send_file(path, "image/png")
             else:
                 self._send_error(HTTPStatus.NOT_FOUND, "not found")
         except KeyError as exc:
@@ -1121,7 +1142,7 @@ class ColorworksHandler(BaseHTTPRequestHandler):
             raise ValueError("JSON body must be an object")
         return data
 
-    def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+    def _send_json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, sort_keys=True).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1138,13 +1159,15 @@ class ColorworksHandler(BaseHTTPRequestHandler):
         assets_base = self.server.store.assets_dir.resolve()
         outputs_base = self.server.store.outputs_dir.resolve()
         artifacts_base = self.server.store.artifacts_dir.resolve()
+        comparison_base = (self.server.store.root / "comparison").resolve()
 
         # Verify that path belongs to one of allowed directories
         is_safe = (
             resolved.is_relative_to(static_base) or
             resolved.is_relative_to(assets_base) or
             resolved.is_relative_to(outputs_base) or
-            resolved.is_relative_to(artifacts_base)
+            resolved.is_relative_to(artifacts_base) or
+            resolved.is_relative_to(comparison_base)
         )
 
         if not is_safe:
