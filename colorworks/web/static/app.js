@@ -1308,12 +1308,24 @@ async function loadGallery() {
     populateFixtureFilter(manifest);
     renderGallery();
   } catch (err) {
-    content.innerHTML = `<div style="padding: 40px; text-align: center; color: #e05638; font-weight: 500;">
-      Error loading gallery: ${err.message}<br>
-      <span style="font-size: 12px; color: var(--muted); font-weight: normal; margin-top: 8px; display: inline-block;">
-        Ensure comparison harness has run: <code>python -m colorworks.algorithms.comparison_harness</code>
-      </span>
-    </div>`;
+    content.innerHTML = "";
+    const errContainer = document.createElement("div");
+    errContainer.style.cssText = "padding: 40px; text-align: center; color: #e05638; font-weight: 500;";
+    errContainer.textContent = `Error loading gallery: ${err.message}`;
+
+    const lineBreak = document.createElement("br");
+    errContainer.appendChild(lineBreak);
+
+    const helpSpan = document.createElement("span");
+    helpSpan.style.cssText = "font-size: 12px; color: var(--muted); font-weight: normal; margin-top: 8px; display: inline-block;";
+    helpSpan.textContent = "Ensure comparison harness has run: ";
+
+    const codeNode = document.createElement("code");
+    codeNode.textContent = "python -m colorworks.algorithms.comparison_harness";
+
+    helpSpan.appendChild(codeNode);
+    errContainer.appendChild(helpSpan);
+    content.appendChild(errContainer);
   }
 }
 
