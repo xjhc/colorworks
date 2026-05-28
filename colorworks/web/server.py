@@ -52,6 +52,7 @@ import colorworks.algorithms.floyd_steinberg
 import colorworks.algorithms.structure_analyzer
 import colorworks.algorithms.cvt_stippling
 import colorworks.algorithms.pang_halftoning
+import colorworks.algorithms.dbs
 
 STATIC_DIR = Path(__file__).with_name("static")
 
@@ -104,6 +105,9 @@ def algorithm_to_dict(algo: Any) -> dict[str, Any]:
             for artifact in defn.artifact_kinds
         ],
         "parameters": [parameter_to_dict(p) for p in defn.parameters],
+        "execution_profile": {
+            "is_iterative": defn.execution_profile.is_iterative,
+        },
     }
 
 
@@ -372,6 +376,7 @@ class ColorworksHandler(BaseHTTPRequestHandler):
             seed=int(payload.get("seed", 42)),
             quality=str(payload.get("quality", "preview")),
             store=ArtifactStore(output_dir=self.server.store.artifacts_dir),
+            calibration=self.server.calibration_accessor,
         )
         return algo, ctx
 
@@ -415,6 +420,10 @@ class ColorworksHandler(BaseHTTPRequestHandler):
 
         algo, ctx = self._build_run_context(payload)
 
+        if renderer_id == "dbs":
+            if ctx.input.image.width > 64 or ctx.input.image.height > 64:
+                raise ValueError("DBS input dimensions exceed the 64x64 pixel limit for the CPU-only reference renderer.")
+
         # Check warm-start availability; key on session+asset+algorithm
         warm_state = self.server.scheduler.get_warm_state(
             session_id, ctx.input.id, renderer_id
@@ -422,6 +431,17 @@ class ColorworksHandler(BaseHTTPRequestHandler):
         if warm_state and hasattr(algo, "can_warm_start"):
             if algo.can_warm_start(warm_state, ctx.params):
                 ctx.warm_start = warm_state
+
+        cal_checksum = None
+        cal_version = None
+        if algo.definition.calibration_assets:
+            checksums = [ref.checksum for ref in algo.definition.calibration_assets]
+            if len(checksums) == 1:
+                cal_checksum = checksums[0]
+            else:
+                cal_checksum = hashlib.sha256(":".join(sorted(checksums)).encode("utf-8")).hexdigest()
+            meta = self.server.store.get_calibration_metadata(algo.definition.calibration_assets[0].checksum)
+            cal_version = meta["version"]
 
         run = PreviewRun(
             id=f"prev_{uuid.uuid4().hex[:12]}",
@@ -433,6 +453,8 @@ class ColorworksHandler(BaseHTTPRequestHandler):
             composition=ctx.composition,
             seed=ctx.seed,
             quality=ctx.quality,
+            calibration_checksum=cal_checksum,
+            calibration_version=cal_version,
         )
 
         self.server.scheduler.submit_preview(run, algo, ctx, session_id)
@@ -440,8 +462,24 @@ class ColorworksHandler(BaseHTTPRequestHandler):
 
     def _handle_render_run_submit(self) -> None:
         payload = self._read_json()
+        renderer_id = str(payload.get("renderer_id", ""))
         algo, ctx = self._build_run_context(payload)
         ctx.quality = "full"
+
+        if renderer_id == "dbs":
+            if ctx.input.image.width > 64 or ctx.input.image.height > 64:
+                raise ValueError("DBS input dimensions exceed the 64x64 pixel limit for the CPU-only reference renderer.")
+
+        cal_checksum = None
+        cal_version = None
+        if algo.definition.calibration_assets:
+            checksums = [ref.checksum for ref in algo.definition.calibration_assets]
+            if len(checksums) == 1:
+                cal_checksum = checksums[0]
+            else:
+                cal_checksum = hashlib.sha256(":".join(sorted(checksums)).encode("utf-8")).hexdigest()
+            meta = self.server.store.get_calibration_metadata(algo.definition.calibration_assets[0].checksum)
+            cal_version = meta["version"]
 
         run = RenderRun(
             id=f"rrun_{uuid.uuid4().hex[:12]}",
@@ -452,6 +490,8 @@ class ColorworksHandler(BaseHTTPRequestHandler):
             composition=ctx.composition,
             seed=ctx.seed,
             quality="full",
+            calibration_checksum=cal_checksum,
+            calibration_version=cal_version,
         )
 
         self.server.scheduler.submit_render(run, algo, ctx)
@@ -492,6 +532,8 @@ class ColorworksHandler(BaseHTTPRequestHandler):
             final_artifact_id=prev_info.get("final_artifact_id"),
             promoted_from_preview_id=run_id,
             artifact_ids=list(ctx.store.list()),
+            calibration_checksum=prev_info.get("calibration_checksum"),
+            calibration_version=prev_info.get("calibration_version"),
         )
         from datetime import timezone
         rrun.completed_at = __import__("datetime").datetime.now(timezone.utc)
@@ -577,6 +619,11 @@ class ColorworksHandler(BaseHTTPRequestHandler):
 
             if algo.definition.role == AlgorithmRole.RENDERER:
                 # Renderer direct execution path (bypasses compositor)
+                cal_assets_checksum = None
+                if algo.definition.calibration_assets:
+                    checksums = [ref.checksum for ref in algo.definition.calibration_assets]
+                    cal_assets_checksum = hashlib.sha256(":".join(sorted(checksums)).encode("utf-8")).hexdigest()
+
                 final_key = self.server.store.get_artifact_cache_key(
                     algo_id=algo.definition.id,
                     algo_version=algo.definition.version,
@@ -584,6 +631,7 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                     asset_checksum=record.checksum,
                     params=ctx.params,
                     parameters_def=algo.definition.parameters,
+                    calibration_assets_checksum=cal_assets_checksum,
                 )
                 final_cache = self.server.store.get_cached_artifact(final_key)
 
@@ -804,6 +852,7 @@ class ColorworksHandler(BaseHTTPRequestHandler):
             composition=None,
             seed=int(payload.get("seed", 42)),
             store=active_store,
+            calibration=self.server.calibration_accessor,
         )
 
         if algo.definition.role == AlgorithmRole.RENDERER:
@@ -815,6 +864,11 @@ class ColorworksHandler(BaseHTTPRequestHandler):
             if algo.is_artifact_enabled(name, params)
         ]
 
+        cal_assets_checksum = None
+        if algo.definition.calibration_assets:
+            checksums = [ref.checksum for ref in algo.definition.calibration_assets]
+            cal_assets_checksum = hashlib.sha256(":".join(sorted(checksums)).encode("utf-8")).hexdigest()
+
         # Compute cache keys for the intermediate artifacts dynamically
         analyze_cache_keys = {}
         for name in enabled_artifacts:
@@ -824,7 +878,8 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                 artifact_name=name,
                 asset_checksum=record.checksum,
                 params=params,
-                parameters_def=algo.definition.parameters
+                parameters_def=algo.definition.parameters,
+                calibration_assets_checksum=cal_assets_checksum,
             )
             analyze_cache_keys[name] = key
 
@@ -1121,6 +1176,12 @@ class ColorworksServer(ThreadingHTTPServer):
         super().__init__(server_address, ColorworksHandler)
         self.store = store
         self.scheduler = RunScheduler(store.runs_dir)
+
+        from colorworks.algorithms import CalibrationAccessor, calibration_registry
+        self.calibration_accessor = CalibrationAccessor(store)
+        for checksum, (data, metadata) in calibration_registry.list_assets().items():
+            if not store.has_calibration_asset(checksum):
+                store.save_calibration_asset(checksum, data, metadata)
 
     def server_close(self) -> None:
         self.scheduler.shutdown()

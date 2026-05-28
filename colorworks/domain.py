@@ -125,6 +125,17 @@ class CalibrationAssetRef:
     checksum: str
 
 @dataclass(frozen=True)
+class CalibrationAsset:
+    id: str
+    algorithm_id: str
+    algorithm_version: str
+    kind: Literal["lut", "tonal_art_map", "neural_weights", "reference_mask", "hvs_model"]
+    storage_uri: str
+    checksum: str
+    size_bytes: int
+    metadata: dict[str, Any]
+
+@dataclass(frozen=True)
 class AlgorithmDefinition:
     id: str
     version: str
@@ -582,6 +593,8 @@ class PreviewRun:
     primary_artifact_id: str | None = None
     final_artifact_id: str | None = None
     error: str | None = None
+    calibration_checksum: str | None = None
+    calibration_version: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -595,6 +608,8 @@ class PreviewRun:
             "final_artifact_id": self.final_artifact_id,
             "error": self.error,
             "created_at": self.created_at.isoformat(),
+            "calibration_checksum": self.calibration_checksum,
+            "calibration_version": self.calibration_version,
         }
 
 
@@ -617,6 +632,8 @@ class RenderRun:
     promoted_from_preview_id: str | None = None
     artifact_ids: list[str] = field(default_factory=list)
     recipe_id: str | None = None
+    calibration_checksum: str | None = None
+    calibration_version: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -632,4 +649,6 @@ class RenderRun:
             "artifact_ids": self.artifact_ids,
             "started_at": self.started_at.isoformat(),
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "calibration_checksum": self.calibration_checksum,
+            "calibration_version": self.calibration_version,
         }

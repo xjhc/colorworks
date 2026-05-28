@@ -290,6 +290,8 @@ class RunScheduler:
                     final_artifact_id=data.get("final_artifact_id"),
                     artifact_ids=data.get("artifact_ids", []),
                     promoted_from_preview_id=data.get("promoted_from_preview_id"),
+                    calibration_checksum=data.get("calibration_checksum"),
+                    calibration_version=data.get("calibration_version"),
                 )
                 run._partial = False
                 with self._lock:

@@ -189,7 +189,7 @@ function scheduleRender() {
 
 // ── iterative (Phase 3) algorithms ───────────────────────────────────────────
 
-const ITERATIVE_ALGORITHMS = new Set(["cvt_stippling"]);
+const ITERATIVE_ALGORITHMS = new Set(["cvt_stippling", "dbs"]);
 
 let _activeSSE = null;
 let _sessionId = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2);

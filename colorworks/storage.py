@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import numpy as np
 
 from PIL import Image, UnidentifiedImageError
 
@@ -61,10 +62,12 @@ class LocalStore:
         self.presets_dir = root / "presets"
         self.artifacts_dir = root / "artifacts"
         self.runs_dir = root / "runs"
+        self.calibration_assets_dir = root / "calibration_assets"
         self.index_path = self.artifacts_dir / "index.json"
 
         for directory in (self.assets_dir, self.outputs_dir, self.recipes_dir,
-                          self.presets_dir, self.artifacts_dir, self.runs_dir):
+                          self.presets_dir, self.artifacts_dir, self.runs_dir,
+                          self.calibration_assets_dir):
             directory.mkdir(parents=True, exist_ok=True)
 
         self._artifacts_index = {}
@@ -224,6 +227,43 @@ class LocalStore:
     def _asset_record_path(self, asset_id: str) -> Path:
         return self.assets_dir / f"{asset_id}.json"
 
+    # Calibration assets storage operations
+    def has_calibration_asset(self, checksum: str) -> bool:
+        return (
+            (self.calibration_assets_dir / f"{checksum}.json").exists()
+            and (self.calibration_assets_dir / f"{checksum}.npy").exists()
+        )
+
+    def save_calibration_asset(self, checksum: str, data: np.ndarray, metadata: dict[str, Any]) -> None:
+        # Enforce content-address integrity
+        data_canonical = np.asarray(data, dtype="<f4")
+        computed_checksum = hashlib.sha256(data_canonical.tobytes()).hexdigest()
+        if computed_checksum != checksum:
+            raise ValueError(f"Calibration data checksum mismatch: computed {computed_checksum} but got {checksum}")
+        if metadata.get("checksum") != checksum:
+            raise ValueError(f"Calibration metadata checksum mismatch: metadata checksum {metadata.get('checksum')} != expected {checksum}")
+
+        meta_path = self.calibration_assets_dir / f"{checksum}.json"
+        npy_path = self.calibration_assets_dir / f"{checksum}.npy"
+        meta_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+        np.save(npy_path, data_canonical)
+
+    def get_calibration_path(self, checksum: str) -> Path:
+        path = self.calibration_assets_dir / f"{checksum}.npy"
+        if not path.exists():
+            raise KeyError(f"unknown calibration asset data: {checksum}")
+        return path
+
+    def get_calibration_metadata(self, checksum: str) -> dict[str, Any]:
+        path = self.calibration_assets_dir / f"{checksum}.json"
+        if not path.exists():
+            raise KeyError(f"unknown calibration asset metadata: {checksum}")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def get_calibration_data(self, checksum: str) -> np.ndarray:
+        path = self.get_calibration_path(checksum)
+        return np.load(path)
+
     # Per-artifact cache helpers
     def get_artifact_cache_key(
         self,
@@ -233,6 +273,7 @@ class LocalStore:
         asset_checksum: str,
         params: dict[str, Any],
         parameters_def: list[ParameterDef],
+        calibration_assets_checksum: str | None = None,
     ) -> str:
         dep_params = {}
         for p in parameters_def:
@@ -240,6 +281,8 @@ class LocalStore:
                 dep_params[p.key] = params.get(p.key, p.default)
         dep_str = ",".join(f"{k}={dep_params[k]}" for k in sorted(dep_params.keys()))
         s = f"{algo_id}:{algo_version}:{artifact_name}:{asset_checksum}:{dep_str}"
+        if calibration_assets_checksum:
+            s += f":calibration={calibration_assets_checksum}"
         return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
     def get_tone_map_cache_key(self, asset_checksum: str, contrast: float, midpoint: float) -> str:

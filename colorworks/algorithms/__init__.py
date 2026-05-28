@@ -25,6 +25,30 @@ class MediaAsset:
     image: Image.Image
     substrate: Substrate
 
+class CalibrationAccessor:
+    def __init__(self, store: Any) -> None:
+        self._store = store
+
+    def get_metadata(self, checksum: str) -> dict[str, Any]:
+        return self._store.get_calibration_metadata(checksum)
+
+    def get_data(self, checksum: str) -> Any:
+        return self._store.get_calibration_data(checksum)
+
+
+class CalibrationRegistry:
+    def __init__(self) -> None:
+        self._assets: dict[str, tuple[Any, dict[str, Any]]] = {}
+
+    def register(self, checksum: str, data: Any, metadata: dict[str, Any]) -> None:
+        self._assets[checksum] = (data, metadata)
+
+    def list_assets(self) -> dict[str, tuple[Any, dict[str, Any]]]:
+        return self._assets
+
+calibration_registry = CalibrationRegistry()
+
+
 @dataclass
 class RenderContext:
     input: MediaAsset
@@ -36,6 +60,7 @@ class RenderContext:
     store: ArtifactStore = field(default_factory=ArtifactStore)
     cancel: CancelToken = field(default_factory=CancelToken)
     warm_start: WarmStartState | None = None
+    calibration: CalibrationAccessor | None = None
     rng: Any = None  # np.random.Generator, lazy-initialised
 
     def __post_init__(self) -> None:
