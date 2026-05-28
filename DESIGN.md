@@ -4,7 +4,7 @@
 
 Two framings up front:
 
-1. **v0 is a focused web tool, not a research platform.** The eventual algorithm set (Pang halftoning, CVT/CCVT stippling, ETF/FDoG line work, surface hatching, neural hybrids — see `RESEARCH.md`) shapes the type system, but the v0 implementation supports raster only and ships with cheap procedural patterns first. §14 is the binding plan; everything earlier is the shape the v0 implementation should grow into without rewrites.
+1. **Colorworks is an image-processing tool, not a research platform.** The product loop is image input -> print-process-inspired raster/vector output -> export. Pang halftoning, CVT stippling, ETF/FDoG line work, SAED, and DBS shape the core roadmap; mesh, video, and neural-heavy substrate work are deferred research, not implied product phases. §14 is the binding plan; everything earlier is the shape the implementation should grow into without rewrites.
 2. **DDD is a tool, not a religion.** Bounded contexts and aggregates appear where they prevent real coupling. No application/infrastructure layering — premature at this scale.
 
 Internal package name: **`colorworks`**. Use it everywhere.
@@ -42,7 +42,7 @@ The contract is `async def render(ctx) -> AsyncIterator[RenderProgress]`. `Stage
 │  Asset          │     │  Algorithm Catalog   │
 │  - RasterImage  │     │  - AlgorithmDef      │
 │                 │     │  - ParameterSchema   │
-│  (future:       │     │  - PatternKindDef    │
+│  (deferred:     │     │  - PatternKindDef    │
 │   Mesh, Video)  │     │  - CalibrationAsset  │
 └────────┬────────┘     └──────────┬───────────┘
          │                         │
@@ -71,7 +71,7 @@ This is the only context split that pays off. Don't sub-layer inside each contex
 
 ### 3.1 Substrate
 
-V0 ships raster only. Mesh and Video are declared so the type system doesn't need rewriting later, but no v0 code uses them.
+The main product ships raster-image workflows. Mesh and Video are declared so the type system has a place for future experiments, but they are deferred research sketches, not binding roadmap deliverables.
 
 ```python
 @dataclass(frozen=True)
@@ -80,7 +80,7 @@ class RasterGrid:
     height: int
     pixel_size: float = 1.0       # source units; matters for print/HVS modeling
 
-# Future substrates — not implemented in v0:
+# Deferred research substrates -- not part of the main roadmap:
 @dataclass(frozen=True)
 class MeshSurface:
     mesh_id: str
@@ -128,7 +128,7 @@ class LabelField:
     substrate: Substrate
     data: np.ndarray              # int32, region/superpixel labels
 
-# Future (Phase 5+):
+# Deferred research / substrate expansion:
 @dataclass
 class CrossField:                 # N-RoSy on a mesh
     substrate: MeshSurface
@@ -429,8 +429,8 @@ class AlgorithmFamily(str, Enum):
     STIPPLING = "stippling"                    # point-set renderers (CVT, electrostatic)
     FLOW_LINE = "flow_line"                    # ETF/FDoG/streamline-based line renderers
     HATCHING_2D = "hatching_2d"                # orientation-driven hatch renderers
-    HATCHING_SURFACE = "hatching_surface"      # mesh-based hatching (Phase 5)
-    NEURAL_HYBRID = "neural_hybrid"            # learned components (Phase 4)
+    HATCHING_SURFACE = "hatching_surface"      # deferred mesh/surface research
+    NEURAL_HYBRID = "neural_hybrid"            # deferred learned components
 
 
 class AlgorithmRole(str, Enum):
@@ -562,7 +562,7 @@ Serialize to JSON. One evaluator on each side. No per-algorithm DSL.
 
 ### 5.6 Calibration assets
 
-SAED LUTs (Phase 4), Tonal Art Maps (Phase 5), neural weights (Phase 4), blue-noise reference masks — all owned by an algorithm version, not by a recipe.
+SAED/DBS LUTs (Phase 4), blue-noise reference masks, and deferred research assets such as Tonal Art Maps or neural weights are owned by an algorithm version, not by a recipe.
 
 ```python
 @dataclass(frozen=True)
@@ -769,7 +769,7 @@ class IterativeAlgorithm(RenderAlgorithm):
     def import_warm_state(self, ctx, state: WarmStartState) -> None: ...
 ```
 
-**StreamingAlgorithm** (Phase 6+; sketched for completeness): video frame-by-frame with optical-flow state propagation. Not implemented in v0.
+**StreamingAlgorithm** (deferred research; sketched for completeness): video frame-by-frame with optical-flow state propagation. Not part of the main roadmap.
 
 ### 6.5 Warm-start contract
 
@@ -1332,7 +1332,9 @@ Two interaction modes:
 
 Build in this order. Each phase ends with a usable product, not just plumbing. Every phase must leave behind agent-verifiable evidence: tests, a smoke path, and a short note on what was intentionally deferred.
 
-Research map: Phase 2 is motivated by `RESEARCH.md` §4.1–§4.2, Phase 3 by §2.2 and §3.1, Phase 4 by §2.1–§2.3 and §5, and Phase 5 by §4.3. Phase 0–1B are product-loop scaffolding plus cheap procedural patterns.
+The binding roadmap stops at Phase 5. Phase 4 completes the core image-algorithm expansion; Phase 5 is product finish, real-image validation, preset tuning, export hardening, and usability. There is no Phase 6/7 in the main plan.
+
+Research map: Phase 2 is motivated by `RESEARCH.md` §4.1–§4.2, Phase 3 by §2.2 and §3.1, and Phase 4 by §2.1–§2.3 and §5. Phase 5 is driven by product evidence, not a new research family. Phase 0–1B are product-loop scaffolding plus cheap procedural patterns.
 
 Agent handoff template for every phase:
 
@@ -1471,89 +1473,84 @@ Evidence to report:
 Deferred:
 - Redis/RQ, multi-user scheduling, GPU slots.
 
-### Phase 4 — Advanced halftoning + first neural hook (long)
+### Phase 4 — Advanced image halftoning quality (long)
 
 Deliverables:
-- **SAED** with immutable calibration assets.
-- **Electrostatic halftoning** with an accelerated path or bounded fallback.
-- **DBS** as a quality-reference renderer, not necessarily interactive.
-- First neural analyzer hook, e.g. I2FNet-style learned ETF, marked `requires_gpu=True`.
-- GPU-aware scheduling and capability flags.
+- **DBS** as a deterministic quality-reference renderer with immutable HVS calibration assets.
+- **SAED** as the final core halftoning renderer, consuming tone/orientation structure without adding a new substrate.
+- Calibration metadata persisted in every durable run that uses calibration assets.
+- Algorithm-specific guardrails for expensive renderers: input-size limits, iteration limits, clear 4xx errors, and UI disablement where needed.
+- A quality comparison harness covering the core output families: Floyd-Steinberg, Pang, CVT stippling, DBS, and SAED.
+- Explicit closure note: after SAED, do not add another main-roadmap algorithm family unless Phase 5 real-image testing proves a concrete product gap.
 
 Acceptance checks:
 - Calibration asset checksum/version is recorded in every run using it.
 - Replacing/re-cooking a calibration asset requires either algorithm version bump or explicit `calibration_version`.
 - DBS reference output is deterministic under fixed seed and small fixture input.
-- GPU-required analyzer is hidden/disabled with a clear message when GPU is unavailable.
-- CPU-only renderers still run while GPU jobs are queued.
+- SAED output is deterministic under fixed seed, reacts to orientation structure on a directional fixture, and rejects unsupported inputs with a user-safe validation error.
+- Expensive renderers stay within documented CPU/time guardrails on fixture inputs.
+- The UI/API routes render DBS and SAED through the same preview/render-run paths users will exercise.
+- The comparison harness produces nonblank outputs and stable evidence for the selected real-image fixtures.
 
 Evidence to report:
 - Run snapshot showing calibration checksum/version.
-- Determinism test hashes for DBS fixture.
-- Scheduler test/log showing GPU capability routing.
-- Quality comparison fixture: SAED/Pang/DBS outputs with metric table.
+- Determinism hashes for DBS and SAED fixtures.
+- Quality comparison fixture: Floyd-Steinberg/Pang/CVT/DBS/SAED outputs with metric table.
+- Browser or API smoke proof showing user-facing DBS/SAED behavior.
+- Guardrail test names and error payload examples.
 
 Deferred:
-- Mesh substrate, full plugin system, production multi-tenant GPU cluster.
+- Electrostatic halftoning, neural analyzer hooks, GPU scheduling, mesh substrate, video, full plugin system, production multi-tenant GPU cluster.
 
-### Phase 5 — Mesh substrate (research budget, long)
+### Phase 5 — Product finish + real-image validation
 
 Deliverables:
-- `MeshSurface` asset ingestion for a small standard mesh format.
-- N-RoSy cross-field smoothing on mesh faces.
-- TAM-based surface hatching with nested tone levels.
-- Three.js viewer with source mesh, field overlay, and hatch output.
-- Mesh artifact viewers and export path.
+- Curated real-image fixture set: portrait, landscape, line art, noisy scan, high-contrast graphic, low-contrast photo, and small icon/illustration.
+- Tuned built-in presets for the core algorithms and common image types.
+- Side-by-side comparison UI for source, selected artifacts, and multiple algorithm outputs.
+- Export hardening for final PNG and SVG outputs: dimensions, color metadata where available, filenames, and repeatable checksums.
+- Batch or gallery workflow for trying several presets against the same source without losing context.
+- Usability pass over controls, run status, cancellation, errors, empty states, and inspector navigation.
+- User-facing examples/docs generated from the fixture gallery.
 
 Acceptance checks:
-- Import a fixture mesh and show it in the browser without blank canvas or camera framing errors.
-- Cross-field smoothing produces deterministic output on a fixture mesh.
-- TAM nesting invariant is tested: darker/finer levels preserve lighter/coarser strokes.
-- Camera movement does not visibly swim strokes for a fixed surface hatch fixture.
-- Mesh-specific artifacts are isolated from raster-only flows.
+- Every fixture renders through the selected core presets without crashes, blank outputs, or stale inspector state.
+- At least one fixture exercises each output path: compositor raster, direct renderer raster, iterative renderer, and SVG export.
+- Exported PNG/SVG files match the displayed output bounds, layer/color expectations, and repeatable checksum rules.
+- Switching algorithms or presets never leaves stale SSE progress, stale artifacts, or hidden controls in the UI.
+- Guardrails for oversized inputs are clear, actionable, and covered by tests.
+- A browser-backed smoke test captures the comparison/gallery workflow on desktop and a narrow viewport.
 
 Evidence to report:
-- Browser screenshot or Playwright canvas-pixel check.
-- Cross-field artifact checksum for fixture mesh.
-- TAM nesting test name/result.
-- Exported mesh/hatch artifact path.
+- Fixture list, fixture dimensions, and selected presets.
+- Output gallery paths/checksums for each fixture/preset pair.
+- Browser screenshots or Playwright evidence for the comparison/gallery workflow.
+- Exported PNG/SVG paths and validation commands.
+- Performance table for representative fixture renders.
 
 Deferred:
-- Video, temporal coherence, user-defined mesh plugins.
+- New algorithm families, mesh substrate, video, neural/GPU research, cloud rendering, collaboration, plugin marketplace.
 
-### Phase 6 — Video / temporal coherence
+### Deferred research appendix — not the product roadmap
 
-- `VideoVolume` substrate and fixture video ingestion.
-- `StreamingAlgorithm` state-passing protocol.
-- Optical-flow ETF propagation for temporally coherent line drawing.
-- Frame scrubber UI and per-frame artifact inspection.
-- Export of rendered frame sequence or short video.
+These topics can stay in the type system and research notes as sketches, but they are not Phase 6/7 and should not be prompted to a coding agent as normal next work. Promote one only with a separate product decision and a new acceptance plan.
 
-Acceptance checks:
-- Fixture clip imports with correct frame count, dimensions, and fps.
-- A streaming render produces frame-indexed artifacts and progress events.
-- Scrubbing frames updates source/output/artifact views without stale display.
-- Temporal coherence metric improves over independent per-frame rendering on a fixture.
-- Parameter change mid-stream follows a documented state reset/resume behavior.
-
-Evidence to report:
-- Imported video metadata.
-- SSE/progress transcript with frame numbers.
-- Temporal metric table: independent vs propagated.
-- Exported frame sequence/video path.
-
-Deferred:
-- Collaboration, cloud rendering, live camera input.
+- `MeshSurface`, N-RoSy cross-fields, TAM surface hatching, Three.js mesh viewers.
+- `VideoVolume`, `StreamingAlgorithm`, optical-flow state propagation, frame scrubbers, video export.
+- Neural analyzer hooks, learned ETF, differentiable algorithms, GPU scheduling.
+- Electrostatic halftoning beyond a bounded product need.
+- User-loaded compositor plugins or a plugin marketplace.
 
 ---
 
 ## 15. Deliberately out of scope
 
-- **Multi-tenancy / auth.** Single-user assumption through Phase 3. Add at the API edge later; no domain changes needed.
+- **Multi-tenancy / auth.** Single-user assumption through the product-finish roadmap. Add at the API edge later; no domain changes needed.
 - **Node-graph editor.** Atomic algorithms + composition is enough. If you want "ETF → SAED-with-orientation," register it as a new composite algorithm, not a generic DAG. Reconsider only after ≥3 such combinations.
 - **Print device profiles.** Add `device_profile: DeviceProfile | None` to `RenderContext` when DBS-class device modeling matters. No domain restructure.
 - **Collaboration / sharing.** Recipes export to JSON. That's enough until users ask.
-- **A second user-extensible Compositor.** v0 ships one built-in compositor. Custom compositors as plugins is a Phase 5+ question.
+- **A second user-extensible Compositor.** The product ships one built-in compositor. Custom compositors as plugins are a deferred research/plugin question.
+- **Mesh, video, live camera, and cloud rendering.** These are separate product directions, not follow-on phases after Phase 5.
 
 ---
 
@@ -1563,9 +1560,9 @@ Worth tracking; don't block Phase 0–1B on them.
 
 1. **Composite algorithms vs. runtime composition.** Default: register as a new algorithm. Revisit when there are 3+ similar combinations.
 2. **Multi-class output shape.** `PointSet[]` with shared substrate, or a `MultiClassPointSet` with explicit inter-class coupling metadata? The latter is more honest about Wasserstein-barycenter / multi-class stippling but adds a type. Defer until multi-class stippling actually lands.
-3. **Differentiable algorithms.** First-class capability (so optimizers can compose) vs. wrapped inside specific algorithms. Phase 4+ decision.
-4. **Online video state-passing.** `StreamingAlgorithm` is sketched; the state-passing protocol for mid-stream parameter changes isn't worked out.
-5. **Plugin pattern kinds.** Should `PatternKindDef` be code-only (compiled into the binary) or loaded from a user directory? Code-only is simpler; user-defined patterns is a real eventual want.
+3. **Differentiable algorithms.** First-class capability (so optimizers can compose) vs. wrapped inside specific algorithms. Deferred research decision.
+4. **Online video state-passing.** `StreamingAlgorithm` is sketched; the state-passing protocol for mid-stream parameter changes is deferred unless video becomes a separate product direction.
+5. **Plugin pattern kinds.** Should `PatternKindDef` be code-only (compiled into the binary) or loaded from a user directory? Code-only is simpler; user-defined patterns is a real eventual want after the core product is stable.
 6. **Hybrid algorithms.** A renderer can already publish intermediate artifacts. Reintroduce `role=HYBRID` only when there is a concrete algorithm that both needs automatic composition and has a distinct direct final output.
 
 ---
