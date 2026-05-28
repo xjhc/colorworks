@@ -258,9 +258,29 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                 # Ensure no folder separator in the filename itself to prevent path traversal
                 if "/" in filename or "\\" in filename or filename == ".." or filename == ".":
                     self._send_error(HTTPStatus.NOT_FOUND, "not found")
+                elif not filename.endswith(".png"):
+                    self._send_error(HTTPStatus.NOT_FOUND, "not found")
                 else:
-                    path = (self.server.store.root / "comparison" / "latest" / filename).resolve()
-                    self._send_file(path, "image/png")
+                    # Validate against filenames referenced in manifest.json
+                    manifest_path = self.server.store.root / "comparison" / "latest" / "manifest.json"
+                    allowed = False
+                    if manifest_path.exists():
+                        try:
+                            with manifest_path.open("r", encoding="utf-8") as f:
+                                manifest_data = json.load(f)
+                            for entry in manifest_data:
+                                source_fn = entry.get("source_url", "").split("/")[-1]
+                                output_fn = entry.get("output_url", "").split("/")[-1]
+                                if filename in (source_fn, output_fn):
+                                    allowed = True
+                                    break
+                        except Exception:
+                            pass
+                    if not allowed:
+                        self._send_error(HTTPStatus.NOT_FOUND, "not found")
+                    else:
+                        path = (self.server.store.root / "comparison" / "latest" / filename).resolve()
+                        self._send_file(path, "image/png")
             else:
                 self._send_error(HTTPStatus.NOT_FOUND, "not found")
         except KeyError as exc:

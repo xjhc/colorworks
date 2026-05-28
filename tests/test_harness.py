@@ -226,12 +226,14 @@ def test_comparison_server_endpoints(tmp_path: Path) -> None:
                 img = Image.open(io.BytesIO(img_data))
                 assert img.format == "PNG"
 
-        # Test 3: Path traversal rejection
+        # Test 3: Path traversal rejection and filename validation
         bad_urls = [
             f"{base_url}/api/comparison/images/../../artifacts/index.json",
             f"{base_url}/api/comparison/images/..%2F..%2Fartifacts%2Findex.json",
             f"{base_url}/api/comparison/images/subdir/../../manifest.json",
             f"{base_url}/api/comparison/images/..%2F%2E%2E%2F..%2Fetc%2Fpasswd",
+            f"{base_url}/api/comparison/images/manifest.json",
+            f"{base_url}/api/comparison/images/nonexistent.png",
         ]
         for bad_url in bad_urls:
             with pytest.raises(urllib.error.HTTPError) as exc_info:

@@ -1381,10 +1381,16 @@ function renderGallery() {
 
     const header = document.createElement("div");
     header.style.cssText = "background: var(--line); padding: 10px 16px; display: flex; justify-content: space-between; align-items: center;";
-    header.innerHTML = `
-      <h3 style="margin: 0; font-size: 15px; font-weight: 700; text-transform: capitalize; color: var(--ink);">Fixture: ${fixtureName}</h3>
-      <span style="font-size: 11px; color: var(--muted); font-family: monospace;">Source Checksum: ${runs[0].fixture_checksum.slice(0, 12)}...</span>
-    `;
+    const title = document.createElement("h3");
+    title.style.cssText = "margin: 0; font-size: 15px; font-weight: 700; text-transform: capitalize; color: var(--ink);";
+    title.textContent = `Fixture: ${fixtureName}`;
+    header.appendChild(title);
+
+    const checksumSpan = document.createElement("span");
+    checksumSpan.style.cssText = "font-size: 11px; color: var(--muted); font-family: monospace;";
+    checksumSpan.textContent = `Source Checksum: ${runs[0].fixture_checksum.slice(0, 12)}...`;
+    header.appendChild(checksumSpan);
+
     fixtureCard.appendChild(header);
 
     const body = document.createElement("div");
@@ -1398,19 +1404,36 @@ function renderGallery() {
 
     const sourceBox = document.createElement("div");
     sourceBox.style.cssText = "flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 4px; padding: 4px; background: var(--panel); position: relative;";
-    sourceBox.innerHTML = `
-      <span style="position: absolute; top: 4px; left: 4px; font-size: 8px; background: var(--muted); color: var(--paper); padding: 1px 4px; border-radius: 2px; font-weight: 600;">SOURCE</span>
-      <img src="${runs[0].source_url}" style="max-height: 110px; max-width: 100%; object-fit: contain; image-rendering: pixelated; border: 1px solid rgba(0,0,0,0.05);">
-      <span style="font-size: 10px; margin-top: 4px; font-weight: 600; color: var(--muted);">${runs[0].width}x${runs[0].height}</span>
-    `;
+    const srcLabel = document.createElement("span");
+    srcLabel.style.cssText = "position: absolute; top: 4px; left: 4px; font-size: 8px; background: var(--muted); color: var(--paper); padding: 1px 4px; border-radius: 2px; font-weight: 600;";
+    srcLabel.textContent = "SOURCE";
+    sourceBox.appendChild(srcLabel);
+
+    const srcImg = document.createElement("img");
+    srcImg.style.cssText = "max-height: 110px; max-width: 100%; object-fit: contain; image-rendering: pixelated; border: 1px solid rgba(0,0,0,0.05);";
+    if (runs[0].source_url && runs[0].source_url.startsWith("/api/comparison/images/")) {
+      srcImg.src = runs[0].source_url;
+    }
+    sourceBox.appendChild(srcImg);
+
+    const srcRes = document.createElement("span");
+    srcRes.style.cssText = "font-size: 10px; margin-top: 4px; font-weight: 600; color: var(--muted);";
+    srcRes.textContent = `${runs[0].width}x${runs[0].height}`;
+    sourceBox.appendChild(srcRes);
+
     imagesContainer.appendChild(sourceBox);
 
     const outputBox = document.createElement("div");
     outputBox.style.cssText = "flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 4px; padding: 4px; background: var(--panel); position: relative;";
 
+    const outLabel = document.createElement("span");
+    outLabel.style.cssText = "position: absolute; top: 4px; left: 4px; font-size: 8px; background: var(--accent); color: var(--paper); padding: 1px 4px; border-radius: 2px; font-weight: 600;";
+    outLabel.textContent = "COMPARED";
+    outputBox.appendChild(outLabel);
+
     const comparedImg = document.createElement("img");
     comparedImg.style.cssText = "max-height: 110px; max-width: 100%; object-fit: contain; image-rendering: pixelated; border: 1px solid rgba(0,0,0,0.05);";
-    if (selectedRun) {
+    if (selectedRun && selectedRun.output_url && selectedRun.output_url.startsWith("/api/comparison/images/")) {
       comparedImg.src = selectedRun.output_url;
     }
 
@@ -1420,7 +1443,6 @@ function renderGallery() {
       comparedRes.textContent = `${selectedRun.width}x${selectedRun.height}`;
     }
 
-    outputBox.innerHTML = `<span style="position: absolute; top: 4px; left: 4px; font-size: 8px; background: var(--accent); color: var(--paper); padding: 1px 4px; border-radius: 2px; font-weight: 600;">COMPARED</span>`;
     outputBox.appendChild(comparedImg);
     outputBox.appendChild(comparedRes);
     imagesContainer.appendChild(outputBox);
@@ -1430,36 +1452,83 @@ function renderGallery() {
     details.style.cssText = "flex: 1; border-top: 1px solid var(--line); padding-top: 12px; font-size: 12px; display: flex; flex-direction: column; gap: 8px;";
 
     function populateDetails(run) {
+      details.innerHTML = "";
       if (!run) {
-        details.innerHTML = '<div style="font-style: italic; color: var(--muted);">No output selected.</div>';
+        const fallback = document.createElement("div");
+        fallback.style.cssText = "font-style: italic; color: var(--muted);";
+        fallback.textContent = "No output selected.";
+        details.appendChild(fallback);
         return;
       }
+      const titleRow = document.createElement("div");
+      titleRow.style.cssText = "display: flex; justify-content: space-between; align-items: baseline;";
+
+      const runTitle = document.createElement("span");
+      runTitle.style.cssText = "font-weight: 700; font-size: 13px; color: var(--ink);";
+      runTitle.textContent = run.preset_id || run.algorithm_id;
+      titleRow.appendChild(runTitle);
+
       const isPreset = run.kind === "preset";
       const kindLabel = isPreset ? "Preset" : "Algorithm";
       const kindColor = isPreset ? "#0f6f78" : "#121212";
 
-      details.innerHTML = `
-        <div style="display: flex; justify-content: space-between; align-items: baseline;">
-          <span style="font-weight: 700; font-size: 13px; color: var(--ink);">${run.preset_id || run.algorithm_id}</span>
-          <span style="font-size: 10px; font-weight: 700; color: white; background: ${kindColor}; padding: 1px 6px; border-radius: 10px; text-transform: uppercase;">${kindLabel}</span>
-        </div>
-        <div style="font-size: 11px; color: var(--muted); margin-bottom: 4px;">
-          Renderer: <code>${run.algorithm_id}</code>
-        </div>
-        <dl style="margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; line-height: 1.4;">
-          <dt style="color: var(--muted);">Runtime:</dt>
-          <dd style="margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums;">${run.runtime_ms.toFixed(2)} ms</dd>
+      const runTag = document.createElement("span");
+      runTag.style.cssText = `font-size: 10px; font-weight: 700; color: white; background: ${kindColor}; padding: 1px 6px; border-radius: 10px; text-transform: uppercase;`;
+      runTag.textContent = kindLabel;
+      titleRow.appendChild(runTag);
 
-          <dt style="color: var(--muted);">MSE:</dt>
-          <dd style="margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; font-family: monospace;">${run.metrics.mse.toFixed(5)}</dd>
+      details.appendChild(titleRow);
 
-          <dt style="color: var(--muted);">Mean Intensity:</dt>
-          <dd style="margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; font-family: monospace;">${run.metrics.mean_intensity.toFixed(4)}</dd>
+      const rendererInfo = document.createElement("div");
+      rendererInfo.style.cssText = "font-size: 11px; color: var(--muted); margin-bottom: 4px;";
+      rendererInfo.textContent = "Renderer: ";
+      const codeNode = document.createElement("code");
+      codeNode.textContent = run.algorithm_id;
+      rendererInfo.appendChild(codeNode);
 
-          <dt style="color: var(--muted); align-self: center;">Checksum:</dt>
-          <dd style="margin: 0; font-family: monospace; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px; text-align: right;" title="${run.checksum}">${run.checksum.slice(0, 16)}...</dd>
-        </dl>
-      `;
+      details.appendChild(rendererInfo);
+
+      const dl = document.createElement("dl");
+      dl.style.cssText = "margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; line-height: 1.4;";
+
+      const dtRuntime = document.createElement("dt");
+      dtRuntime.style.color = "var(--muted)";
+      dtRuntime.textContent = "Runtime:";
+      const ddRuntime = document.createElement("dd");
+      ddRuntime.style.cssText = "margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums;";
+      ddRuntime.textContent = `${run.runtime_ms.toFixed(2)} ms`;
+      dl.appendChild(dtRuntime);
+      dl.appendChild(ddRuntime);
+
+      const dtMse = document.createElement("dt");
+      dl.appendChild(dtMse);
+      dtMse.style.color = "var(--muted)";
+      dtMse.textContent = "MSE:";
+      const ddMse = document.createElement("dd");
+      ddMse.style.cssText = "margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; font-family: monospace;";
+      ddMse.textContent = run.metrics.mse.toFixed(5);
+      dl.appendChild(ddMse);
+
+      const dtIntensity = document.createElement("dt");
+      dtIntensity.style.color = "var(--muted)";
+      dtIntensity.textContent = "Mean Intensity:";
+      const ddIntensity = document.createElement("dd");
+      ddIntensity.style.cssText = "margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; font-family: monospace;";
+      ddIntensity.textContent = run.metrics.mean_intensity.toFixed(4);
+      dl.appendChild(dtIntensity);
+      dl.appendChild(ddIntensity);
+
+      const dtChecksum = document.createElement("dt");
+      dtChecksum.style.cssText = "color: var(--muted); align-self: center;";
+      dtChecksum.textContent = "Checksum:";
+      const ddChecksum = document.createElement("dd");
+      ddChecksum.style.cssText = "margin: 0; font-family: monospace; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px; text-align: right;";
+      ddChecksum.textContent = `${run.checksum.slice(0, 16)}...`;
+      ddChecksum.title = run.checksum;
+      dl.appendChild(dtChecksum);
+      dl.appendChild(ddChecksum);
+
+      details.appendChild(dl);
     }
 
     populateDetails(selectedRun);
@@ -1489,19 +1558,29 @@ function renderGallery() {
         transition: all 0.15s ease;
       `;
 
-      thumb.innerHTML = `
-        <img src="${run.output_url}" style="height: 60px; max-width: 100%; object-fit: contain; image-rendering: pixelated; border: 1px solid rgba(0,0,0,0.05);">
-        <span style="font-size: 11px; font-weight: 600; text-align: center; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; width: 100%; color: var(--ink);" title="${run.preset_id || run.algorithm_id}">
-          ${run.preset_id || run.algorithm_id}
-        </span>
-        <span style="font-size: 9px; color: var(--muted); font-variant-numeric: tabular-nums;">
-          MSE: ${run.metrics.mse.toFixed(4)}
-        </span>
-      `;
+      const thumbImg = document.createElement("img");
+      thumbImg.style.cssText = "height: 60px; max-width: 100%; object-fit: contain; image-rendering: pixelated; border: 1px solid rgba(0,0,0,0.05);";
+      if (run.output_url && run.output_url.startsWith("/api/comparison/images/")) {
+        thumbImg.src = run.output_url;
+      }
+      thumb.appendChild(thumbImg);
+
+      const label = document.createElement("span");
+      label.style.cssText = "font-size: 11px; font-weight: 600; text-align: center; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; width: 100%; color: var(--ink);";
+      label.textContent = run.preset_id || run.algorithm_id;
+      label.title = run.preset_id || run.algorithm_id;
+      thumb.appendChild(label);
+
+      const mseLabel = document.createElement("span");
+      mseLabel.style.cssText = "font-size: 9px; color: var(--muted); font-variant-numeric: tabular-nums;";
+      mseLabel.textContent = `MSE: ${run.metrics.mse.toFixed(4)}`;
+      thumb.appendChild(mseLabel);
 
       thumb.addEventListener("click", () => {
         galleryState.selectedRuns[fixtureName] = run;
-        comparedImg.src = run.output_url;
+        if (run.output_url && run.output_url.startsWith("/api/comparison/images/")) {
+          comparedImg.src = run.output_url;
+        }
         comparedRes.textContent = `${run.width}x${run.height}`;
         populateDetails(run);
 
