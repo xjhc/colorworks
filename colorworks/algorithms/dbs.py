@@ -12,6 +12,7 @@ from colorworks.algorithms import (
     RenderContext,
     calibration_registry,
 )
+from colorworks.algorithms.image_ops import colorize_binary_ink_mask
 from colorworks.domain import (
     AlgorithmDefinition,
     AlgorithmFamily,
@@ -31,19 +32,7 @@ from colorworks.domain import (
 )
 
 
-HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3}$|^#[0-9a-fA-F]{6}$")
 
-
-def validate_color(hex_str: str) -> None:
-    if not HEX_COLOR_RE.match(hex_str):
-        raise ValueError(f"Invalid hex color format: {hex_str}. Must be #RGB or #RRGGBB.")
-
-
-def parse_color(hex_str: str) -> tuple[int, int, int]:
-    hex_str = hex_str.lstrip("#")
-    if len(hex_str) == 3:
-        hex_str = "".join(c * 2 for c in hex_str)
-    return int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16)
 
 
 def _compute_default_hvs() -> tuple[np.ndarray, dict[str, Any], str]:
@@ -91,7 +80,7 @@ DEFINITION = AlgorithmDefinition(
     role=AlgorithmRole.RENDERER,
     name="Direct Binary Search",
     description="Model-based Direct Binary Search iterative halftoning (CPU reference).",
-    input_spec=InputSpec(primary="raster", accepts_color=True),
+    input_spec=InputSpec(primary="raster", accepts_color=True, max_resolution=64),
     output_spec=OutputSpec(
         primary_artifact="final_raster",
         produces_composition=False,
@@ -178,21 +167,6 @@ def _convolve2d_zero(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     return out
 
 
-def colorize_raster(b: np.ndarray, ink_color: str, paper_color: str) -> Image.Image:
-    """Colorize a halftone matrix b where 1.0 is ink_color and 0.0 is paper_color."""
-    validate_color(ink_color)
-    validate_color(paper_color)
-    ink_rgb = parse_color(ink_color)
-    paper_rgb = parse_color(paper_color)
-
-    H, W = b.shape
-    out = np.zeros((H, W, 3), dtype=np.uint8)
-
-    mask = (b > 0.5)
-    out[mask] = ink_rgb
-    out[~mask] = paper_rgb
-
-    return Image.fromarray(out, mode="RGB")
 
 
 class DBSRenderer(IterativeAlgorithm):
@@ -212,11 +186,10 @@ class DBSRenderer(IterativeAlgorithm):
         gray_img = ImageOps.grayscale(ctx.input.image)
         gray = np.asarray(gray_img, dtype=np.float32) / 255.0
         self._f = 1.0 - gray
-
-        # Validate size: DBS allows at most 64x64 at initialization / runtime
         H, W = self._f.shape
-        if H > 64 or W > 64:
-            raise ValueError(f"DBS input dimensions ({W}x{H}) exceed the 64x64 pixel limit for the CPU-only reference renderer.")
+
+        # Validate size limit using InputSpec helper
+        self.definition.input_spec.validate_image_size(self.definition.id, W, H)
 
         # Seed initial binary halftone matrix b in {0.0, 1.0} using ctx.rng for determinism
         self._b = (ctx.rng.random(self._f.shape) < self._f).astype(np.float32)
@@ -317,13 +290,13 @@ class DBSRenderer(IterativeAlgorithm):
     def build_iteration_preview(self, ctx: RenderContext, iteration: int) -> IterationPreview:
         ink_color = str(ctx.params.get("ink_color", "#1a1a1a"))
         paper_color = str(ctx.params.get("paper_color", "#f4ebd9"))
-        img = colorize_raster(self._b, ink_color, paper_color)
+        img = colorize_binary_ink_mask(self._b, ink_color, paper_color)
         return IterationPreview(mode="direct_raster", direct_raster=img)
 
     def finalize(self, ctx: RenderContext, *, partial: bool, warm_state: WarmStartState | None) -> RenderResult:
         ink_color = str(ctx.params.get("ink_color", "#1a1a1a"))
         paper_color = str(ctx.params.get("paper_color", "#f4ebd9"))
-        final_img = colorize_raster(self._b, ink_color, paper_color)
+        final_img = colorize_binary_ink_mask(self._b, ink_color, paper_color)
         final_id = ctx.store.publish("final_raster", final_img)
 
         return RenderResult(

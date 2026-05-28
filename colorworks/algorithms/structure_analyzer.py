@@ -4,6 +4,13 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from colorworks.algorithms import StagedAlgorithm, registry
+from colorworks.algorithms.image_ops import (
+    to_gray,
+    remap_tone,
+    convolve2d_nearest,
+    gaussian_blur,
+    etf_smooth,
+)
 from colorworks.domain import (
     AlgorithmDefinition,
     AlgorithmFamily,
@@ -140,83 +147,6 @@ DEFINITION = AlgorithmDefinition(
     ),
 )
 
-def to_gray(image: Image.Image) -> np.ndarray:
-    return np.asarray(ImageOps.grayscale(image), dtype=np.float32) / 255.0
-
-def remap_tone(gray: np.ndarray, contrast: float, midpoint: float) -> np.ndarray:
-    return np.clip((gray - midpoint) * contrast + 0.5, 0.0, 1.0)
-
-def convolve2d_nearest(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
-    H, W = image.shape
-    kh, kw = kernel.shape
-    ph, pw = kh // 2, kw // 2
-    padded = np.pad(image, ((ph, ph), (pw, pw)), mode="edge")
-    output = np.zeros_like(image)
-    for i in range(kh):
-        for j in range(kw):
-            output += padded[i : i + H, j : j + W] * kernel[i, j]
-    return output
-
-def gaussian_blur(img: np.ndarray, sigma: float) -> np.ndarray:
-    radius = int(max(1.0, 3.0 * sigma))
-    offsets = np.arange(-radius, radius + 1, dtype=np.int32)
-    kernel = np.exp(-(offsets.astype(np.float32) ** 2) / (2.0 * sigma**2))
-    kernel /= kernel.sum()
-
-    # Horizontal blur
-    padded_h = np.pad(img, ((0, 0), (radius, radius)), mode="edge")
-    h_blurred = np.zeros_like(img)
-    for offset, weight in zip(offsets, kernel):
-        h_blurred += padded_h[:, radius + offset : radius + offset + img.shape[1]] * weight
-
-    # Vertical blur
-    padded_v = np.pad(h_blurred, ((radius, radius), (0, 0)), mode="edge")
-    v_blurred = np.zeros_like(img)
-    for offset, weight in zip(offsets, kernel):
-        v_blurred += padded_v[radius + offset : radius + offset + img.shape[0], :] * weight
-    return v_blurred
-
-def etf_smooth(t: np.ndarray, Jxx: np.ndarray, Jyy: np.ndarray, iterations: int, radius: int) -> np.ndarray:
-    H, W, _ = t.shape
-    # Compute magnitude as the trace/energy of local gradient
-    mag = np.sqrt(np.maximum(Jxx + Jyy, 0.0))
-
-    for _ in range(iterations):
-        t_new = np.zeros_like(t)
-        # Vectorized neighborhood offset loop
-        for dy in range(-radius, radius + 1):
-            for dx in range(-radius, radius + 1):
-                dist2 = dx**2 + dy**2
-                if dist2 > radius**2:
-                    continue
-
-                # Spatial Gaussian weight
-                w_s = np.exp(-dist2 / (2.0 * (radius / 2.0)**2))
-
-                y_min, y_max = max(0, dy), min(H, H + dy)
-                x_min, x_max = max(0, dx), min(W, W + dx)
-
-                y_shift_min, y_shift_max = max(0, -dy), min(H, H - dy)
-                x_shift_min, x_shift_max = max(0, -dx), min(W, W - dx)
-
-                t_neighbor = t[y_shift_min:y_shift_max, x_shift_min:x_shift_max]
-                mag_neighbor = mag[y_shift_min:y_shift_max, x_shift_min:x_shift_max]
-
-                # Align direction (dot product sign)
-                dot = (t_neighbor[:, :, 0] * t[y_min:y_max, x_min:x_max, 0] +
-                       t_neighbor[:, :, 1] * t[y_min:y_max, x_min:x_max, 1])
-                sign = np.where(dot >= 0, 1.0, -1.0)
-
-                weight = w_s * mag_neighbor
-
-                t_new[y_min:y_max, x_min:x_max, 0] += weight * sign * t_neighbor[:, :, 0]
-                t_new[y_min:y_max, x_min:x_max, 1] += weight * sign * t_neighbor[:, :, 1]
-
-        # Avoid division-by-zero runtime warning by using np.divide with where clause
-        norm = np.linalg.norm(t_new, axis=-1, keepdims=True)
-        t = np.divide(t_new, norm, out=t, where=norm > 1e-6)
-
-    return t
 
 class StructureAnalyzer(StagedAlgorithm):
     definition = DEFINITION

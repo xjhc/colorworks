@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from typing import Any
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image
 
 from colorworks.algorithms import StagedAlgorithm, registry, RenderContext, calibration_registry
-from colorworks.algorithms.structure_analyzer import (
+from colorworks.algorithms.image_ops import (
     to_gray,
     remap_tone,
     convolve2d_nearest,
     gaussian_blur,
     etf_smooth,
+    colorize_binary_ink_mask,
 )
 from colorworks.domain import (
     AlgorithmDefinition,
@@ -29,20 +29,6 @@ from colorworks.domain import (
     RenderResult,
     CalibrationAssetRef,
 )
-
-HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3}$|^#[0-9a-fA-F]{6}$")
-
-
-def validate_color(hex_str: str) -> None:
-    if not HEX_COLOR_RE.match(hex_str):
-        raise ValueError(f"Invalid hex color format: {hex_str}. Must be #RGB or #RRGGBB.")
-
-
-def parse_color(hex_str: str) -> tuple[int, int, int]:
-    hex_str = hex_str.lstrip("#")
-    if len(hex_str) == 3:
-        hex_str = "".join(c * 2 for c in hex_str)
-    return int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16)
 
 
 def _compute_saed_lut() -> tuple[np.ndarray, dict[str, Any], str]:
@@ -102,7 +88,7 @@ DEFINITION = AlgorithmDefinition(
     role=AlgorithmRole.RENDERER,
     name="Structure-Aware Error Diffusion",
     description="CPU-only structure-aware error diffusion dither using orientation-guided Gabor thresholds and anisotropic coefficients.",
-    input_spec=InputSpec(primary="raster", accepts_color=True),
+    input_spec=InputSpec(primary="raster", accepts_color=True, max_resolution=256),
     output_spec=OutputSpec(
         primary_artifact="final_raster",
         produces_composition=False,
@@ -270,31 +256,13 @@ class SAEDRenderer(StagedAlgorithm):
         ink_color = str(ctx.params.get("ink_color", "#1a1a1a"))
         paper_color = str(ctx.params.get("paper_color", "#f4ebd9"))
 
-        validate_color(ink_color)
-        validate_color(paper_color)
-
+        # Preflight size constraint check
         H = ctx.input.image.height
         W = ctx.input.image.width
-        if H > 256 or W > 256:
-            raise ValueError("SAED input dimensions exceed the 256x256 pixel limit for the CPU-only reference renderer.")
+        self.definition.input_spec.validate_image_size(self.definition.id, W, H)
 
         # 2. Load calibration asset
-        checksum = self.definition.calibration_assets[0].checksum
-        if ctx.calibration is not None:
-            lut = ctx.calibration.get_data(checksum)
-        else:
-            lut = DEFAULT_SAED_DATA
-
-        # Validate that the Gabor LUT is a 3D array with an odd square kernel shape
-        if lut.ndim != 3 or lut.shape[0] == 0 or lut.shape[1] != lut.shape[2] or lut.shape[1] % 2 != 1:
-            raise ValueError(
-                "Calibration SAED Gabor LUT must be a 3D array with shape "
-                "(angles, kernel_size, kernel_size) where kernel_size is an odd square."
-            )
-
-        n_angles = lut.shape[0]
-        support = lut.shape[1]
-        radius = support // 2
+        lut = self._load_validated_lut(ctx)
 
         # 3. Grayscale conversion & Tone mapping (Density space: 1.0 = ink, 0.0 = paper)
         gray = to_gray(ctx.input.image)
@@ -302,6 +270,35 @@ class SAEDRenderer(StagedAlgorithm):
         f = 1.0 - adjusted_gray
 
         # 4. Structure Tensor & Orientation Field (Phase 2 helpers)
+        t, Jxx_smooth, Jyy_smooth = self._compute_orientation_field(gray, sigma, etf_iterations, etf_radius)
+
+        # 5. Spatially-Varying Gabor Threshold
+        T = self._compute_gabor_threshold(f, t, lut, gabor_amplitude)
+
+        # 6. Anisotropic Error Diffusion
+        out = self._diffuse_density(f, t, T, Jxx_smooth, Jyy_smooth, anisotropy_alpha, edge_scaling)
+
+        # 7. Colorization and Publishing
+        img = colorize_binary_ink_mask(out, ink_color, paper_color)
+        ctx.store.publish("final_raster", img)
+
+    def _load_validated_lut(self, ctx: RenderContext) -> np.ndarray:
+        checksum = self.definition.calibration_assets[0].checksum
+        if ctx.calibration is not None:
+            lut = ctx.calibration.get_data(checksum)
+        else:
+            lut = DEFAULT_SAED_DATA
+
+        if lut.ndim != 3 or lut.shape[0] == 0 or lut.shape[1] != lut.shape[2] or lut.shape[1] % 2 != 1:
+            raise ValueError(
+                "Calibration SAED Gabor LUT must be a 3D array with shape "
+                "(angles, kernel_size, kernel_size) where kernel_size is an odd square."
+            )
+        return lut
+
+    def _compute_orientation_field(
+        self, gray: np.ndarray, sigma: float, etf_iterations: int, etf_radius: int
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         Kx = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=np.float32) / 8.0
         Ky = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=np.float32) / 8.0
 
@@ -323,8 +320,14 @@ class SAEDRenderer(StagedAlgorithm):
 
         if etf_iterations > 0:
             t = etf_smooth(t, Jxx_smooth, Jyy_smooth, etf_iterations, etf_radius)
+        return t, Jxx_smooth, Jyy_smooth
 
-        # 5. Spatially-Varying Gabor Threshold
+    def _compute_gabor_threshold(self, f: np.ndarray, t: np.ndarray, lut: np.ndarray, gabor_amplitude: float) -> np.ndarray:
+        H, W = f.shape
+        n_angles = lut.shape[0]
+        support = lut.shape[1]
+        radius = support // 2
+
         tx_vals = t[:, :, 0]
         ty_vals = t[:, :, 1]
         angles = np.arctan2(ty_vals, tx_vals) % np.pi
@@ -338,9 +341,12 @@ class SAEDRenderer(StagedAlgorithm):
                 window = f_padded[y : y + support, x : x + support]
                 I_G[y, x] = np.sum(window * kernel)
 
-        T = np.clip(0.5 + gabor_amplitude * I_G, 0.01, 0.99)
+        return np.clip(0.5 + gabor_amplitude * I_G, 0.01, 0.99)
 
-        # 6. Anisotropic Error Diffusion
+    def _diffuse_density(
+        self, f: np.ndarray, t: np.ndarray, T: np.ndarray, Jxx_smooth: np.ndarray, Jyy_smooth: np.ndarray, anisotropy_alpha: float, edge_scaling: float
+    ) -> np.ndarray:
+        H, W = f.shape
         neighbors = [(0, 1), (1, -1), (1, 0), (1, 1)]
         w_FS = np.array([7/16, 3/16, 5/16, 1/16], dtype=np.float32)
 
@@ -382,15 +388,7 @@ class SAEDRenderer(StagedAlgorithm):
                     if 0 <= ny < H and 0 <= nx < W:
                         arr[ny, nx] += err * weights[k]
 
-        # 7. Colorization and Publishing (1.0 = ink_color, 0.0 = paper_color)
-        ink_rgb = parse_color(ink_color)
-        paper_rgb = parse_color(paper_color)
-        canvas = np.empty((H, W, 3), dtype=np.uint8)
-        canvas[out] = ink_rgb
-        canvas[~out] = paper_rgb
-
-        img = Image.fromarray(canvas)
-        ctx.store.publish("final_raster", img)
+        return out
 
     def synthesize(self, ctx: RenderContext) -> None:
         pass

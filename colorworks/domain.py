@@ -56,6 +56,16 @@ class Eq(Predicate):
 class InputSpec:
     primary: str = "raster"
     accepts_color: bool = True
+    max_resolution: int | None = None
+
+    def validate_image_size(self, algo_id: str, width: int, height: int) -> None:
+        if self.max_resolution is not None:
+            if width > self.max_resolution or height > self.max_resolution:
+                algo_code = algo_id.upper()
+                raise ValueError(
+                    f"{algo_code} input dimensions exceed the {self.max_resolution}x{self.max_resolution} "
+                    "pixel limit for the CPU-only reference renderer."
+                )
 
 @dataclass(frozen=True)
 class OutputSpec:

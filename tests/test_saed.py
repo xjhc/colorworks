@@ -222,7 +222,7 @@ def test_saed_tone_convention_and_colors() -> None:
     """Verify tone convention (1.0=ink, 0.0=paper) and correct color mapping."""
     ink_color = "#112233"
     paper_color = "#ddeeff"
-    from colorworks.algorithms.saed import parse_color
+    from colorworks.algorithms.image_ops import parse_color
     ink_rgb = parse_color(ink_color)
     paper_rgb = parse_color(paper_color)
 

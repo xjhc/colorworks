@@ -414,28 +414,7 @@ class ColorworksHandler(BaseHTTPRequestHandler):
             ))
         return Composition(paper_color=PaletteColor(paper_hex), layers=layers_list)
 
-    def _handle_preview_run_submit(self) -> None:
-        payload = self._read_json()
-        renderer_id = str(payload.get("renderer_id", ""))
-        session_id = str(payload.get("session_id", uuid.uuid4().hex))
-
-        algo, ctx = self._build_run_context(payload)
-
-        if renderer_id == "dbs":
-            if ctx.input.image.width > 64 or ctx.input.image.height > 64:
-                raise ValueError("DBS input dimensions exceed the 64x64 pixel limit for the CPU-only reference renderer.")
-        if renderer_id == "saed":
-            if ctx.input.image.width > 256 or ctx.input.image.height > 256:
-                raise ValueError("SAED input dimensions exceed the 256x256 pixel limit for the CPU-only reference renderer.")
-
-        # Check warm-start availability; key on session+asset+algorithm
-        warm_state = self.server.scheduler.get_warm_state(
-            session_id, ctx.input.id, renderer_id
-        )
-        if warm_state and hasattr(algo, "can_warm_start"):
-            if algo.can_warm_start(warm_state, ctx.params):
-                ctx.warm_start = warm_state
-
+    def _resolve_calibration_snapshot(self, algo: Any) -> tuple[str | None, str | None]:
         cal_checksum = None
         cal_version = None
         if algo.definition.calibration_assets:
@@ -446,6 +425,26 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                 cal_checksum = hashlib.sha256(":".join(sorted(checksums)).encode("utf-8")).hexdigest()
             meta = self.server.store.get_calibration_metadata(algo.definition.calibration_assets[0].checksum)
             cal_version = meta["version"]
+        return cal_checksum, cal_version
+
+    def _handle_preview_run_submit(self) -> None:
+        payload = self._read_json()
+        renderer_id = str(payload.get("renderer_id", ""))
+        session_id = str(payload.get("session_id", uuid.uuid4().hex))
+
+        algo, ctx = self._build_run_context(payload)
+
+        algo.definition.input_spec.validate_image_size(renderer_id, ctx.input.image.width, ctx.input.image.height)
+
+        # Check warm-start availability; key on session+asset+algorithm
+        warm_state = self.server.scheduler.get_warm_state(
+            session_id, ctx.input.id, renderer_id
+        )
+        if warm_state and hasattr(algo, "can_warm_start"):
+            if algo.can_warm_start(warm_state, ctx.params):
+                ctx.warm_start = warm_state
+
+        cal_checksum, cal_version = self._resolve_calibration_snapshot(algo)
 
         run = PreviewRun(
             id=f"prev_{uuid.uuid4().hex[:12]}",
@@ -470,23 +469,9 @@ class ColorworksHandler(BaseHTTPRequestHandler):
         algo, ctx = self._build_run_context(payload)
         ctx.quality = "full"
 
-        if renderer_id == "dbs":
-            if ctx.input.image.width > 64 or ctx.input.image.height > 64:
-                raise ValueError("DBS input dimensions exceed the 64x64 pixel limit for the CPU-only reference renderer.")
-        if renderer_id == "saed":
-            if ctx.input.image.width > 256 or ctx.input.image.height > 256:
-                raise ValueError("SAED input dimensions exceed the 256x256 pixel limit for the CPU-only reference renderer.")
+        algo.definition.input_spec.validate_image_size(renderer_id, ctx.input.image.width, ctx.input.image.height)
 
-        cal_checksum = None
-        cal_version = None
-        if algo.definition.calibration_assets:
-            checksums = [ref.checksum for ref in algo.definition.calibration_assets]
-            if len(checksums) == 1:
-                cal_checksum = checksums[0]
-            else:
-                cal_checksum = hashlib.sha256(":".join(sorted(checksums)).encode("utf-8")).hexdigest()
-            meta = self.server.store.get_calibration_metadata(algo.definition.calibration_assets[0].checksum)
-            cal_version = meta["version"]
+        cal_checksum, cal_version = self._resolve_calibration_snapshot(algo)
 
         run = RenderRun(
             id=f"rrun_{uuid.uuid4().hex[:12]}",
@@ -621,21 +606,16 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                     "synchronously. Use POST /api/preview_runs or POST /api/render_runs."
                 )
 
-            if renderer_id == "saed":
-                with Image.open(record.path) as img:
-                    width, height = img.size
-                if width > 256 or height > 256:
-                    raise ValueError("SAED input dimensions exceed the 256x256 pixel limit for the CPU-only reference renderer.")
+            with Image.open(record.path) as img:
+                width, height = img.size
+            algo.definition.input_spec.validate_image_size(renderer_id, width, height)
 
             # 1. Use the shared pipeline execution helper
             ctx, comp_obj, algo, enabled_artifacts = self._execute_pipeline(payload)
 
             if algo.definition.role == AlgorithmRole.RENDERER:
                 # Renderer direct execution path (bypasses compositor)
-                cal_assets_checksum = None
-                if algo.definition.calibration_assets:
-                    checksums = [ref.checksum for ref in algo.definition.calibration_assets]
-                    cal_assets_checksum = hashlib.sha256(":".join(sorted(checksums)).encode("utf-8")).hexdigest()
+                cal_assets_checksum, _ = self._resolve_calibration_snapshot(algo)
 
                 final_key = self.server.store.get_artifact_cache_key(
                     algo_id=algo.definition.id,
@@ -877,10 +857,7 @@ class ColorworksHandler(BaseHTTPRequestHandler):
             if algo.is_artifact_enabled(name, params)
         ]
 
-        cal_assets_checksum = None
-        if algo.definition.calibration_assets:
-            checksums = [ref.checksum for ref in algo.definition.calibration_assets]
-            cal_assets_checksum = hashlib.sha256(":".join(sorted(checksums)).encode("utf-8")).hexdigest()
+        cal_assets_checksum, _ = self._resolve_calibration_snapshot(algo)
 
         # Compute cache keys for the intermediate artifacts dynamically
         analyze_cache_keys = {}
