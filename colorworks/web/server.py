@@ -53,6 +53,7 @@ import colorworks.algorithms.structure_analyzer
 import colorworks.algorithms.cvt_stippling
 import colorworks.algorithms.pang_halftoning
 import colorworks.algorithms.dbs
+import colorworks.algorithms.saed
 
 STATIC_DIR = Path(__file__).with_name("static")
 
@@ -423,6 +424,9 @@ class ColorworksHandler(BaseHTTPRequestHandler):
         if renderer_id == "dbs":
             if ctx.input.image.width > 64 or ctx.input.image.height > 64:
                 raise ValueError("DBS input dimensions exceed the 64x64 pixel limit for the CPU-only reference renderer.")
+        if renderer_id == "saed":
+            if ctx.input.image.width > 256 or ctx.input.image.height > 256:
+                raise ValueError("SAED input dimensions exceed the 256x256 pixel limit for the CPU-only reference renderer.")
 
         # Check warm-start availability; key on session+asset+algorithm
         warm_state = self.server.scheduler.get_warm_state(
@@ -469,6 +473,9 @@ class ColorworksHandler(BaseHTTPRequestHandler):
         if renderer_id == "dbs":
             if ctx.input.image.width > 64 or ctx.input.image.height > 64:
                 raise ValueError("DBS input dimensions exceed the 64x64 pixel limit for the CPU-only reference renderer.")
+        if renderer_id == "saed":
+            if ctx.input.image.width > 256 or ctx.input.image.height > 256:
+                raise ValueError("SAED input dimensions exceed the 256x256 pixel limit for the CPU-only reference renderer.")
 
         cal_checksum = None
         cal_version = None
@@ -613,6 +620,12 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                     f"'{renderer_id}' is an iterative algorithm and cannot be rendered "
                     "synchronously. Use POST /api/preview_runs or POST /api/render_runs."
                 )
+
+            if renderer_id == "saed":
+                with Image.open(record.path) as img:
+                    width, height = img.size
+                if width > 256 or height > 256:
+                    raise ValueError("SAED input dimensions exceed the 256x256 pixel limit for the CPU-only reference renderer.")
 
             # 1. Use the shared pipeline execution helper
             ctx, comp_obj, algo, enabled_artifacts = self._execute_pipeline(payload)

@@ -212,9 +212,9 @@ def etf_smooth(t: np.ndarray, Jxx: np.ndarray, Jyy: np.ndarray, iterations: int,
                 t_new[y_min:y_max, x_min:x_max, 0] += weight * sign * t_neighbor[:, :, 0]
                 t_new[y_min:y_max, x_min:x_max, 1] += weight * sign * t_neighbor[:, :, 1]
 
-        # Re-normalize vector field
+        # Avoid division-by-zero runtime warning by using np.divide with where clause
         norm = np.linalg.norm(t_new, axis=-1, keepdims=True)
-        t = np.where(norm > 1e-6, t_new / norm, t)
+        t = np.divide(t_new, norm, out=t, where=norm > 1e-6)
 
     return t
 
