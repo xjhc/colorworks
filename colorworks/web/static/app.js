@@ -16,7 +16,8 @@ const state = {
     paper_color: { hex: "#f4ebd9" },
     layers: []
   },
-  presets: []
+  presets: [],
+  activePresetId: null
 };
 
 const els = {
@@ -183,15 +184,22 @@ function getExportFilename(extension) {
   if (!state.asset) return "";
   const assetId = state.asset.id;
   let presetOrRenderer = getActivePipeline();
-  if (els.presetSelect && els.presetSelect.value) {
-    presetOrRenderer = els.presetSelect.value;
+  if (state.activePresetId) {
+    presetOrRenderer = state.activePresetId;
   }
   return `colorworks-${assetId}-${presetOrRenderer}.${extension}`;
 }
 
 let _activeRunId = null;
+let _activeRenderToken = 0;
+let _applyingPreset = false;
 
 function clearStaleOutput() {
+  _activeRenderToken++;
+  if (!_applyingPreset) {
+    state.activePresetId = null;
+  }
+
   state.output = null;
   state.tone_map = null;
   state.edge_mask = null;
@@ -373,6 +381,8 @@ async function renderNow() {
   }
   setStatus("Rendering");
 
+  const token = ++_activeRenderToken;
+
   const mode = getActivePipeline();
   const payload = {
     asset_id: state.asset.id,
@@ -396,6 +406,10 @@ async function renderNow() {
   });
 
   const result = await response.json();
+  if (token !== _activeRenderToken) {
+    return; // Discard stale response
+  }
+
   if (!response.ok) {
     setStatus(result.error || "Render failed");
     return;
@@ -1267,40 +1281,47 @@ async function applyPreset(silent = false) {
   const preset = state.presets.find((p) => p.id === els.presetSelect.value);
   if (!preset) return;
 
-  // Load pipeline
-  els.pipelineSelect.value = preset.renderer_id;
-  renderControlsForMode(preset.renderer_id);
+  _applyingPreset = true;
+  try {
+    // Load pipeline
+    els.pipelineSelect.value = preset.renderer_id;
+    renderControlsForMode(preset.renderer_id);
 
-  // Set parameters
-  if (state.schemas) {
-    const algo = state.schemas.algorithms.find((a) => a.id === preset.renderer_id);
-    if (algo) {
-      algo.parameters.forEach((param) => {
-        const el = document.querySelector(`#param-${param.key}`);
-        if (el) {
-          if (param.type === "bool") {
-            el.checked = !!preset.params[param.key];
-          } else if (param.type === "str") {
-            el.value = preset.params[param.key];
-          } else {
-            el.value = preset.params[param.key];
+    // Set parameters
+    if (state.schemas) {
+      const algo = state.schemas.algorithms.find((a) => a.id === preset.renderer_id);
+      if (algo) {
+        algo.parameters.forEach((param) => {
+          const el = document.querySelector(`#param-${param.key}`);
+          if (el) {
+            if (param.type === "bool") {
+              el.checked = !!preset.params[param.key];
+            } else if (param.type === "str") {
+              el.value = preset.params[param.key];
+            } else {
+              el.value = preset.params[param.key];
+            }
           }
-        }
-      });
-      updateVisibility();
+        });
+        updateVisibility();
+      }
     }
+
+    // Load composition if present
+    if (modeUsesComposition(preset.renderer_id) && preset.composition && Array.isArray(preset.composition.layers)) {
+      state.composition = JSON.parse(JSON.stringify(preset.composition));
+      if (els.paperColorPicker && state.composition.paper_color) {
+        els.paperColorPicker.value = state.composition.paper_color.hex;
+      }
+      renderLayersUI();
+    }
+
+    state.activePresetId = preset.id;
+    scheduleRender();
+  } finally {
+    _applyingPreset = false;
   }
 
-  // Load composition if present
-  if (modeUsesComposition(preset.renderer_id) && preset.composition && Array.isArray(preset.composition.layers)) {
-    state.composition = JSON.parse(JSON.stringify(preset.composition));
-    if (els.paperColorPicker && state.composition.paper_color) {
-      els.paperColorPicker.value = state.composition.paper_color.hex;
-    }
-    renderLayersUI();
-  }
-
-  scheduleRender();
   if (!silent) {
     setStatus(`Applied preset: ${preset.name}`);
   }
@@ -1411,7 +1432,7 @@ async function exportSvg() {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `colorworks-${state.asset.id.slice(0, 8)}.svg`;
+  link.download = getExportFilename("svg");
   document.body.appendChild(link);
   link.click();
   link.remove();
