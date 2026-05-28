@@ -1357,6 +1357,7 @@ async function savePreset() {
   await loadPresetsList();
   if (els.presetSelect) {
     els.presetSelect.value = result.id;
+    state.activePresetId = result.id;
     updatePresetMetaUI();
   }
   setStatus("Preset saved");
