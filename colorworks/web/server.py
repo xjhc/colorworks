@@ -856,7 +856,10 @@ class ColorworksHandler(BaseHTTPRequestHandler):
 
         record = self.server.store.get_asset(asset_id)
 
-        algo = registry.get(renderer_id)
+        try:
+            algo = registry.get(renderer_id)
+        except KeyError:
+            raise ValueError(f"unsupported or unregistered renderer_id: {renderer_id}")
 
         params_dict = payload.get("params", {})
         comp_dict = payload.get("composition", {})
@@ -1063,6 +1066,10 @@ class ColorworksHandler(BaseHTTPRequestHandler):
         payload = self._read_json()
         ctx, comp_obj, algo, enabled_artifacts = self._execute_pipeline(payload)
         record = self.server.store.get_asset(payload["asset_id"])
+
+        if comp_obj is None:
+            self._send_error(HTTPStatus.BAD_REQUEST, "SVG export requires a composited pipeline (e.g. tonal_analyzer)")
+            return
 
         has_stroke_layer = False
         for l in comp_obj.layers:

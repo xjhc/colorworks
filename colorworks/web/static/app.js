@@ -43,6 +43,7 @@ const els = {
   vectorControls: document.querySelector("#vectorControls"),
   vectorViewSelect: document.querySelector("#vectorViewSelect"),
   exportSvgBtn: document.querySelector("#exportSvgBtn"),
+  cancelRenderBtn: document.querySelector("#cancelRenderBtn"),
 
   // Presets and Layers Elements
   presetSelect: document.querySelector("#presetSelect"),
@@ -178,12 +179,77 @@ function updateControlLabels() {
   });
 }
 
+function getExportFilename(extension) {
+  if (!state.asset) return "";
+  const assetId = state.asset.id;
+  let presetOrRenderer = getActivePipeline();
+  if (els.presetSelect && els.presetSelect.value) {
+    presetOrRenderer = els.presetSelect.value;
+  }
+  return `colorworks-${assetId}-${presetOrRenderer}.${extension}`;
+}
+
+let _activeRunId = null;
+
+function clearStaleOutput() {
+  state.output = null;
+  state.tone_map = null;
+  state.edge_mask = null;
+  state.structure_tensor = null;
+  state.orientation_field = null;
+
+  if (els.renderTime) els.renderTime.textContent = "";
+  if (els.outputChecksum) els.outputChecksum.textContent = "";
+
+  if (els.exportLink) {
+    els.exportLink.href = "#";
+    els.exportLink.removeAttribute("download");
+    els.exportLink.classList.add("disabled");
+  }
+
+  if (state.activeTab === "final") {
+    state.activeTab = "source";
+  }
+
+  if (els.cancelRenderBtn) {
+    els.cancelRenderBtn.style.display = "none";
+  }
+
+  if (_activeSSE) {
+    _activeSSE.close();
+    _activeSSE = null;
+  }
+  if (_activeRunId) {
+    const oldRunId = _activeRunId;
+    _activeRunId = null;
+    fetch(`/api/preview_runs/${oldRunId}`, { method: "DELETE" }).catch((err) => console.error("Cancel old run failed:", err));
+  }
+
+  updateViewer();
+  refreshChrome();
+}
+
+async function cancelCurrentRender() {
+  if (_activeRunId) {
+    const runId = _activeRunId;
+    _activeRunId = null;
+    if (_activeSSE) {
+      _activeSSE.close();
+      _activeSSE = null;
+    }
+    if (els.cancelRenderBtn) els.cancelRenderBtn.style.display = "none";
+    setStatus("Cancelled");
+    await fetch(`/api/preview_runs/${runId}`, { method: "DELETE" }).catch((err) => console.error("Cancel failed:", err));
+  }
+}
+
 function scheduleRender() {
   updateControlLabels();
   if (!state.asset) {
     return;
   }
   clearTimeout(state.renderTimer);
+  clearStaleOutput();
   state.renderTimer = window.setTimeout(renderNow, 90);
 }
 
@@ -202,6 +268,11 @@ function isIterative(mode) {
 
 async function renderIterative(mode, payload) {
   if (_activeSSE) { _activeSSE.close(); _activeSSE = null; }
+  if (_activeRunId) {
+    const oldRunId = _activeRunId;
+    _activeRunId = null;
+    fetch(`/api/preview_runs/${oldRunId}`, { method: "DELETE" }).catch((err) => console.error("Cancel old run failed:", err));
+  }
 
   payload.session_id = _sessionId;
   const submitResp = await fetch("/api/preview_runs", {
@@ -216,12 +287,18 @@ async function renderIterative(mode, payload) {
   }
   const run = await submitResp.json();
   const runId = run.id;
+  _activeRunId = runId;
+  if (els.cancelRenderBtn) els.cancelRenderBtn.style.display = "inline-block";
   setStatus(`Running (${runId.slice(0, 10)}…)`);
 
   const sse = new EventSource(`/api/preview_runs/${runId}/events`);
   _activeSSE = sse;
 
   sse.addEventListener("iteration", (evt) => {
+    if (runId !== _activeRunId) {
+      sse.close();
+      return;
+    }
     const data = JSON.parse(evt.data);
     const it = data.iteration !== undefined ? data.iteration + 1 : "?";
     const energy = data.energy !== null && data.energy !== undefined
@@ -230,11 +307,14 @@ async function renderIterative(mode, payload) {
   });
 
   sse.addEventListener("completed", (evt) => {
+    if (runId !== _activeRunId) {
+      sse.close();
+      return;
+    }
     const data = JSON.parse(evt.data);
-    sse.close(); _activeSSE = null;
+    sse.close(); _activeSSE = null; _activeRunId = null;
+    if (els.cancelRenderBtn) els.cancelRenderBtn.style.display = "none";
     setStatus("Complete — loading output…");
-    // CVT stippling: primary_artifact_id points to stipple_points,
-    // final_artifact_id points to the raster image
     const finalId = data.final_artifact_id || data.primary_artifact_id;
     if (finalId) {
       state.output = {
@@ -245,7 +325,7 @@ async function renderIterative(mode, payload) {
         render_ms: 0,
       };
       els.exportLink.href = state.output.url;
-      els.exportLink.download = `colorworks-${finalId.slice(0, 12)}.png`;
+      els.exportLink.download = getExportFilename("png");
       els.exportLink.classList.remove("disabled");
       updateViewer();
       refreshChrome();
@@ -254,18 +334,34 @@ async function renderIterative(mode, payload) {
   });
 
   sse.addEventListener("cancelled", () => {
-    sse.close(); _activeSSE = null;
+    if (runId !== _activeRunId) {
+      sse.close();
+      return;
+    }
+    sse.close(); _activeSSE = null; _activeRunId = null;
+    if (els.cancelRenderBtn) els.cancelRenderBtn.style.display = "none";
     setStatus("Cancelled");
   });
 
   sse.addEventListener("failed", (evt) => {
-    sse.close(); _activeSSE = null;
+    if (runId !== _activeRunId) {
+      sse.close();
+      return;
+    }
+    sse.close(); _activeSSE = null; _activeRunId = null;
+    if (els.cancelRenderBtn) els.cancelRenderBtn.style.display = "none";
     const data = JSON.parse(evt.data);
     setStatus("Failed: " + (data.error || "unknown"));
   });
 
   sse.onerror = () => {
-    sse.close(); _activeSSE = null;
+    if (runId !== _activeRunId) {
+      sse.close();
+      return;
+    }
+    sse.close(); _activeSSE = null; _activeRunId = null;
+    if (els.cancelRenderBtn) els.cancelRenderBtn.style.display = "none";
+    setStatus("Connection failed");
   };
 }
 
@@ -324,7 +420,7 @@ async function renderNow() {
   els.renderTime.textContent = `${state.output.render_ms} ms`;
   els.outputChecksum.textContent = state.output.checksum.slice(0, 16);
   els.exportLink.href = state.output.url;
-  els.exportLink.download = `colorworks-${state.output.checksum.slice(0, 12)}.png`;
+  els.exportLink.download = getExportFilename("png");
   els.exportLink.classList.remove("disabled");
   refreshChrome();
   setStatus(`${state.output.width} x ${state.output.height}`);
@@ -1116,12 +1212,17 @@ function updatePresetMetaUI() {
       const strong = document.createElement("strong");
       strong.textContent = "Tags: ";
       tagsDiv.appendChild(strong);
-      preset.style_tags.forEach((tag) => {
+      preset.style_tags.forEach((tag, index) => {
+        if (index > 0) {
+          const sep = document.createElement("span");
+          sep.style.cssText = "position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); border: 0;";
+          sep.textContent = ", ";
+          tagsDiv.appendChild(sep);
+        }
         const tagSpan = document.createElement("span");
         tagSpan.style.cssText = "background: var(--line); padding: 1px 4px; border-radius: 3px; margin-right: 4px; font-size: 10px;";
         tagSpan.textContent = tag;
         tagsDiv.appendChild(tagSpan);
-        tagsDiv.appendChild(document.createTextNode(" "));
       });
     } else {
       tagsDiv.style.display = "none";
@@ -1726,6 +1827,7 @@ async function init() {
   }
   if (els.addLayerBtn) els.addLayerBtn.addEventListener("click", addLayer);
   if (els.exportSvgBtn) els.exportSvgBtn.addEventListener("click", exportSvg);
+  if (els.cancelRenderBtn) els.cancelRenderBtn.addEventListener("click", cancelCurrentRender);
   if (els.paperColorPicker) {
     els.paperColorPicker.addEventListener("change", (e) => {
       state.composition.paper_color.hex = e.target.value;
