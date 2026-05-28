@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import numpy as np
-from PIL import Image
 
 from colorworks.algorithms import StagedAlgorithm, registry, RenderContext
 from colorworks.algorithms.image_ops import (

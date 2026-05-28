@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 import numpy as np
-from PIL import Image
 
 from colorworks.algorithms import StagedAlgorithm, registry, RenderContext, calibration_registry
 from colorworks.algorithms.image_ops import (

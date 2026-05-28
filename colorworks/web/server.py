@@ -106,6 +106,11 @@ def algorithm_to_dict(algo: Any) -> dict[str, Any]:
             for artifact in defn.artifact_kinds
         ],
         "parameters": [parameter_to_dict(p) for p in defn.parameters],
+        "input_spec": {
+            "primary": defn.input_spec.primary,
+            "accepts_color": defn.input_spec.accepts_color,
+            "max_resolution": defn.input_spec.max_resolution,
+        },
         "execution_profile": {
             "is_iterative": defn.execution_profile.is_iterative,
         },

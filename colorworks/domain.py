@@ -64,7 +64,7 @@ class InputSpec:
                 algo_code = algo_id.upper()
                 raise ValueError(
                     f"{algo_code} input dimensions exceed the {self.max_resolution}x{self.max_resolution} "
-                    "pixel limit for the CPU-only reference renderer."
+                    "pixel limit."
                 )
 
 @dataclass(frozen=True)

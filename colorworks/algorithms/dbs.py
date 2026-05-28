@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from typing import Any
 import numpy as np
-from PIL import Image, ImageOps
 
 from colorworks.algorithms import (
     IterativeAlgorithm,
@@ -12,7 +10,7 @@ from colorworks.algorithms import (
     RenderContext,
     calibration_registry,
 )
-from colorworks.algorithms.image_ops import colorize_binary_ink_mask
+from colorworks.algorithms.image_ops import colorize_binary_ink_mask, to_gray
 from colorworks.domain import (
     AlgorithmDefinition,
     AlgorithmFamily,
@@ -183,8 +181,7 @@ class DBSRenderer(IterativeAlgorithm):
         self._radius = self._r_hh.shape[0] // 2
 
         # Get grayscale input and convert to density f = 1.0 - gray
-        gray_img = ImageOps.grayscale(ctx.input.image)
-        gray = np.asarray(gray_img, dtype=np.float32) / 255.0
+        gray = to_gray(ctx.input.image)
         self._f = 1.0 - gray
         H, W = self._f.shape
 

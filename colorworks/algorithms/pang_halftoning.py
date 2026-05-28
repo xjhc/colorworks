@@ -202,7 +202,7 @@ def _compute_fields(image: Image.Image) -> tuple[np.ndarray, np.ndarray]:
       orient:    [H, W, 2] float32 unit vectors, edge tangent direction
     """
     # Reuse Phase 2 helpers — no duplication.
-    from colorworks.algorithms.structure_analyzer import (
+    from colorworks.algorithms.image_ops import (
         convolve2d_nearest,
         gaussian_blur,
         to_gray,

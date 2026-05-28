@@ -38,9 +38,12 @@ async def run_algorithm(algo: Any, ctx: RenderContext) -> None:
         pass
 
 
-def run_harness() -> str:
-    # Ensure colorworks_data/comparison directory exists
-    output_dir = Path("colorworks_data/comparison")
+def run_harness(output_dir: Path | str | None = None) -> str:
+    if output_dir is None:
+        output_dir = Path("colorworks_data/comparison")
+    else:
+        output_dir = Path(output_dir)
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     img = make_gradient_image(64, 64)
@@ -51,7 +54,7 @@ def run_harness() -> str:
 
     # Algorithms to run
     algo_ids = ["floyd_steinberg", "pang_halftoning", "cvt_stippling", "dbs", "saed"]
-    
+
     results = []
 
     # Make sure they are registered
@@ -63,13 +66,13 @@ def run_harness() -> str:
 
     for algo_id in algo_ids:
         algo = registry.get(algo_id)
-        
+
         # Build standard ink/paper params for consistency in MSE/density metric
         params = {
             "ink_color": "#000000",
             "paper_color": "#ffffff",
         }
-        
+
         # Set algorithm-specific iterations/dots to keep it fast and consistent
         if algo_id == "pang_halftoning":
             params["n_dots"] = 200
@@ -100,13 +103,9 @@ def run_harness() -> str:
         asyncio.run(run_algorithm(algo, ctx))
         elapsed_ms = (time.perf_counter() - start) * 1000.0
 
-        # Retrieve the final raster image
-        try:
-            art = store.get_by_name("final_raster")
-            out_img = art.value
-        except KeyError:
-            # Fallback if final_raster wasn't generated
-            out_img = Image.new("RGB", (64, 64), (255, 255, 255))
+        # Retrieve the final raster image (fail hard if missing)
+        art = store.get_by_name("final_raster")
+        out_img = art.value
 
         # Save image
         out_path = output_dir / f"{algo_id}.png"
