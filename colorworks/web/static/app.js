@@ -1121,6 +1121,7 @@ function updatePresetMetaUI() {
         tagSpan.style.cssText = "background: var(--line); padding: 1px 4px; border-radius: 3px; margin-right: 4px; font-size: 10px;";
         tagSpan.textContent = tag;
         tagsDiv.appendChild(tagSpan);
+        tagsDiv.appendChild(document.createTextNode(" "));
       });
     } else {
       tagsDiv.style.display = "none";
@@ -1232,7 +1233,10 @@ async function savePreset() {
 
   els.newPresetName.value = "";
   await loadPresetsList();
-  if (els.presetSelect) els.presetSelect.value = result.id;
+  if (els.presetSelect) {
+    els.presetSelect.value = result.id;
+    updatePresetMetaUI();
+  }
   setStatus("Preset saved");
 }
 
