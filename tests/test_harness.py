@@ -47,29 +47,13 @@ def test_comparison_harness_isolation_and_manifest(tmp_path: Path) -> None:
         manifest = json.load(f)
 
     assert isinstance(manifest, list)
-    # 7 fixtures * 8 runs (5 core algorithms + 3 presets) = 56 entries
-    assert len(manifest) == 56
+    from colorworks.presets import BUILTIN_PRESETS
+    core_algos = ["floyd_steinberg", "pang_halftoning", "cvt_stippling", "dbs", "saed"]
+    expected_count = len(FIXTURES) * (len(core_algos) + len(BUILTIN_PRESETS))
+    assert len(manifest) == expected_count
 
-    expected_fixture_names = {
-        "portrait",
-        "landscape",
-        "line_art",
-        "noisy_scan",
-        "high_contrast",
-        "low_contrast",
-        "icon",
-    }
-
-    expected_algorithm_ids = {
-        "floyd_steinberg",
-        "pang_halftoning",
-        "cvt_stippling",
-        "dbs",
-        "saed",
-        "wave_halftone",
-        "maze_halftone",
-        "hatch",
-    }
+    expected_fixture_names = set(FIXTURES.keys())
+    expected_run_ids = set(core_algos) | {p["id"] for p in BUILTIN_PRESETS}
 
     # Verify all expected runs are in the manifest
     seen_combinations = set()
@@ -104,13 +88,22 @@ def test_comparison_harness_isolation_and_manifest(tmp_path: Path) -> None:
         preset_id = entry["preset_id"]
 
         assert fixture_name in expected_fixture_names
-        assert run_id in expected_algorithm_ids
+        assert run_id in expected_run_ids
         assert kind in {"algorithm", "preset"}
         assert len(fixture_checksum) == 64  # SHA-256 hex string length
 
         if kind == "preset":
-            assert algo_id == "tonal_analyzer"
+            preset_data = next(p for p in BUILTIN_PRESETS if p["id"] == run_id)
+            assert algo_id == preset_data["renderer_id"]
             assert preset_id == run_id
+
+            # Verify preset metadata fields exist and match
+            assert "preset_metadata" in entry
+            meta = entry["preset_metadata"]
+            assert meta["description"] == preset_data["description"]
+            assert meta["recommended_for"] == preset_data["recommended_for"]
+            assert meta["style_tags"] == preset_data["style_tags"]
+            assert meta["sort_order"] == preset_data["sort_order"]
         else:
             assert algo_id == run_id
             assert preset_id is None
@@ -157,8 +150,8 @@ def test_comparison_harness_isolation_and_manifest(tmp_path: Path) -> None:
 
         seen_combinations.add((fixture_name, run_id))
 
-    # Check that we covered all 56 combinations
-    assert len(seen_combinations) == 56
+    # Check that we covered all combinations
+    assert len(seen_combinations) == expected_count
 
 
 def test_comparison_server_endpoints(tmp_path: Path) -> None:
@@ -183,7 +176,10 @@ def test_comparison_server_endpoints(tmp_path: Path) -> None:
             manifest_data = json.loads(r.read())
 
         assert isinstance(manifest_data, list)
-        assert len(manifest_data) == 56
+        from colorworks.presets import BUILTIN_PRESETS
+        core_algos = ["floyd_steinberg", "pang_halftoning", "cvt_stippling", "dbs", "saed"]
+        expected_count = len(FIXTURES) * (len(core_algos) + len(BUILTIN_PRESETS))
+        assert len(manifest_data) == expected_count
 
         # Check entries
         entry = manifest_data[0]
@@ -244,3 +240,71 @@ def test_comparison_server_endpoints(tmp_path: Path) -> None:
         server.shutdown()
         server.server_close()
         t.join(timeout=3)
+
+
+def test_builtin_presets_valid_and_renderable() -> None:
+    from colorworks.presets import BUILTIN_PRESETS
+    from colorworks.domain import RasterGrid, ArtifactStore
+    from colorworks.algorithms import MediaAsset, RenderContext, registry
+    from colorworks.algorithms.comparison_harness import RegistryCalibrationAccessor, parse_composition
+    import asyncio
+
+    # Dummy image
+    img = Image.new("L", (16, 16), color=128)
+    substrate = RasterGrid(16, 16)
+    asset = MediaAsset(
+        id="dummy",
+        checksum="dummy_checksum",
+        image=img,
+        substrate=substrate,
+    )
+
+    for preset in BUILTIN_PRESETS:
+        # Check metadata
+        assert "description" in preset and isinstance(preset["description"], str)
+        assert len(preset["description"]) > 0
+        assert "recommended_for" in preset and isinstance(preset["recommended_for"], list)
+        assert len(preset["recommended_for"]) > 0
+        assert "style_tags" in preset and isinstance(preset["style_tags"], list)
+        assert len(preset["style_tags"]) > 0
+        assert "sort_order" in preset and isinstance(preset["sort_order"], int)
+
+        # Render test
+        store = ArtifactStore(output_dir=None)
+        ctx = RenderContext(
+            input=asset,
+            params=preset["params"],
+            composition=None,
+            seed=42,
+            store=store,
+            calibration=RegistryCalibrationAccessor(),
+        )
+
+        algo = registry.get(preset["renderer_id"])
+
+        async def run_algo():
+            async for _ in algo.render(ctx):
+                pass
+
+        asyncio.run(run_algo())
+
+        # If it uses compositor, test compositing
+        if preset["renderer_id"] in ("tonal_analyzer", "structure_analyzer"):
+            assert "composition" in preset
+            comp_obj = parse_composition(preset["composition"], seed=42)
+            from colorworks.compositor import Compositor
+            compositor = Compositor(store)
+            out_img = compositor.composite(comp_obj, 16, 16, 42)
+            assert out_img is not None
+
+
+def test_every_fixture_has_recommended_preset() -> None:
+    from colorworks.presets import BUILTIN_PRESETS
+    from colorworks.algorithms.fixtures import FIXTURES
+
+    for fixture_name in FIXTURES.keys():
+        recommended_presets = [
+            p for p in BUILTIN_PRESETS
+            if fixture_name in p.get("recommended_for", [])
+        ]
+        assert len(recommended_presets) > 0, f"Fixture '{fixture_name}' has no recommended presets!"

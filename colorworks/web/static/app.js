@@ -1087,24 +1087,80 @@ function addLayer() {
   scheduleRender();
 }
 
+function updatePresetMetaUI() {
+  const metaDiv = document.querySelector("#presetMeta");
+  const descDiv = document.querySelector("#presetMetaDesc");
+  const recDiv = document.querySelector("#presetMetaRec");
+  const tagsDiv = document.querySelector("#presetMetaTags");
+  if (!metaDiv || !els.presetSelect) return;
+
+  const preset = state.presets.find((p) => p.id === els.presetSelect.value);
+  if (preset && (preset.description || preset.recommended_for || preset.style_tags)) {
+    metaDiv.style.display = "block";
+    descDiv.textContent = preset.description || "";
+
+    if (preset.recommended_for && Array.isArray(preset.recommended_for) && preset.recommended_for.length > 0) {
+      recDiv.style.display = "block";
+      recDiv.textContent = "";
+      const strong = document.createElement("strong");
+      strong.textContent = "Recommended for: ";
+      recDiv.appendChild(strong);
+      recDiv.appendChild(document.createTextNode(preset.recommended_for.join(", ")));
+    } else {
+      recDiv.style.display = "none";
+    }
+
+    if (preset.style_tags && Array.isArray(preset.style_tags) && preset.style_tags.length > 0) {
+      tagsDiv.style.display = "block";
+      tagsDiv.textContent = "";
+      const strong = document.createElement("strong");
+      strong.textContent = "Tags: ";
+      tagsDiv.appendChild(strong);
+      preset.style_tags.forEach((tag) => {
+        const tagSpan = document.createElement("span");
+        tagSpan.style.cssText = "background: var(--line); padding: 1px 4px; border-radius: 3px; margin-right: 4px; font-size: 10px;";
+        tagSpan.textContent = tag;
+        tagsDiv.appendChild(tagSpan);
+      });
+    } else {
+      tagsDiv.style.display = "none";
+    }
+  } else {
+    metaDiv.style.display = "none";
+  }
+}
+
 // Preset CRUD logic
 async function loadPresetsList() {
   const res = await fetch("/api/presets");
   const data = await res.json();
   state.presets = data.presets;
 
+  // Sort presets: built-ins first by sort_order, then user presets alphabetically
+  state.presets.sort((a, b) => {
+    const orderA = a.sort_order !== undefined ? a.sort_order : 999;
+    const orderB = b.sort_order !== undefined ? b.sort_order : 999;
+    if (orderA !== orderB) {
+      return orderA - orderB;
+    }
+    return a.name.localeCompare(b.name);
+  });
+
   if (els.presetSelect) {
     els.presetSelect.innerHTML = "";
     state.presets.forEach((preset) => {
       const opt = document.createElement("option");
       opt.value = preset.id;
-      opt.textContent = preset.name + (preset.is_builtin ? " (Built-in)" : "");
+      const isStyle = preset.renderer_id === "tonal_analyzer" || preset.renderer_id === "structure_analyzer";
+      const typeLabel = isStyle ? "Style" : "Algorithm";
+      opt.textContent = `${preset.name} [${typeLabel}]` + (preset.is_builtin ? "" : " (User)");
       els.presetSelect.appendChild(opt);
     });
+    updatePresetMetaUI();
   }
 }
 
-async function applyPreset() {
+async function applyPreset(silent = false) {
   if (!els.presetSelect || !els.presetSelect.value) return;
   const preset = state.presets.find((p) => p.id === els.presetSelect.value);
   if (!preset) return;
@@ -1143,7 +1199,9 @@ async function applyPreset() {
   }
 
   scheduleRender();
-  setStatus(`Applied preset: ${preset.name}`);
+  if (!silent) {
+    setStatus(`Applied preset: ${preset.name}`);
+  }
 }
 
 async function savePreset() {
@@ -1656,9 +1714,12 @@ async function init() {
   els.reloadRecipe.addEventListener("click", reloadRecipe);
 
   // Setup Presets and Layers UI event listeners
-  if (els.loadPreset) els.loadPreset.addEventListener("click", applyPreset);
+  if (els.loadPreset) els.loadPreset.addEventListener("click", () => applyPreset());
   if (els.deletePreset) els.deletePreset.addEventListener("click", deletePreset);
   if (els.savePreset) els.savePreset.addEventListener("click", savePreset);
+  if (els.presetSelect) {
+    els.presetSelect.addEventListener("change", updatePresetMetaUI);
+  }
   if (els.addLayerBtn) els.addLayerBtn.addEventListener("click", addLayer);
   if (els.exportSvgBtn) els.exportSvgBtn.addEventListener("click", exportSvg);
   if (els.paperColorPicker) {
@@ -1691,6 +1752,16 @@ async function init() {
   renderLayersUI();
   await loadPresetsList();
   await loadRecipeList();
+
+  // On first launch, apply default preset "wave_halftone" silently if available
+  if (els.presetSelect) {
+    const defaultPresetExists = state.presets.some(p => p.id === "wave_halftone");
+    if (defaultPresetExists) {
+      els.presetSelect.value = "wave_halftone";
+      await applyPreset(true);
+    }
+  }
+
   updateViewer();
 }
 

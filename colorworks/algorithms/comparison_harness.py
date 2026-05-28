@@ -211,9 +211,10 @@ def run_harness(output_dir: Path | str | None = None) -> str:
                 art = store.get_by_name("final_raster")
                 out_img = art.value
             else:
-                # Run the preset renderer (tonal_analyzer)
+                # Run the preset renderer
                 preset_data = spec["preset_data"]
                 params = dict(preset_data["params"])
+                renderer_id = preset_data["renderer_id"]
 
                 store = ArtifactStore(output_dir=None)
                 ctx = RenderContext(
@@ -226,14 +227,19 @@ def run_harness(output_dir: Path | str | None = None) -> str:
                 )
 
                 start = time.perf_counter()
-                algo = registry.get("tonal_analyzer")
+                algo = registry.get(renderer_id)
                 asyncio.run(run_algorithm(algo, ctx))
 
-                # Now compose the layers
-                comp_obj = parse_composition(preset_data["composition"], seed=42)
-                from colorworks.compositor import Compositor
-                compositor = Compositor(store)
-                out_img = compositor.composite(comp_obj, width, height, 42)
+                if renderer_id in ("tonal_analyzer", "structure_analyzer"):
+                    # Now compose the layers
+                    comp_obj = parse_composition(preset_data["composition"], seed=42)
+                    from colorworks.compositor import Compositor
+                    compositor = Compositor(store)
+                    out_img = compositor.composite(comp_obj, width, height, 42)
+                else:
+                    # Retrieve the final raster image directly
+                    art = store.get_by_name("final_raster")
+                    out_img = art.value
                 elapsed_ms = (time.perf_counter() - start) * 1000.0
 
             # Save image
@@ -259,12 +265,12 @@ def run_harness(output_dir: Path | str | None = None) -> str:
             })
 
             # Keep for JSON manifest
-            manifest_data.append({
+            entry_dict = {
                 "fixture_name": fixture_name,
                 "fixture_checksum": fixture_checksum,
                 "run_id": run_id,
                 "kind": "preset" if is_preset else "algorithm",
-                "algorithm_id": "tonal_analyzer" if is_preset else run_id,
+                "algorithm_id": preset_data["renderer_id"] if is_preset else run_id,
                 "preset_id": run_id if is_preset else None,
                 "params": params,
                 "source_path": str(source_path),
@@ -283,7 +289,15 @@ def run_harness(output_dir: Path | str | None = None) -> str:
                 },
                 "mse": float(mse),
                 "mean_intensity": float(mean_intensity),
-            })
+            }
+            if is_preset:
+                entry_dict["preset_metadata"] = {
+                    "description": preset_data.get("description"),
+                    "recommended_for": preset_data.get("recommended_for"),
+                    "style_tags": preset_data.get("style_tags"),
+                    "sort_order": preset_data.get("sort_order"),
+                }
+            manifest_data.append(entry_dict)
 
         # Generate Markdown Table for this fixture
         lines = [
