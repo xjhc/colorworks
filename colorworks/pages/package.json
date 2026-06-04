@@ -1,0 +1,20 @@
+{
+  "name": "colorworks-pages",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-only Colorworks studio — N-colour dithered art, deployed to GitHub Pages.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "gen:bluenoise": "python scripts/gen_blue_noise.py"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^2.1.4"
+  }
+}
