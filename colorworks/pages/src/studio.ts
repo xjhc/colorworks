@@ -7,7 +7,7 @@
 import "./styles.css";
 import {
   STYLES,
-  TONE_DITHER_PARAMS,
+  styleParams,
   DEFAULT_STYLE_ID,
   type ParamDef,
   type StyleDef,
@@ -20,6 +20,7 @@ import {
   type Raster,
   type RenderOptions,
 } from "./colorworks";
+import { renderDepixelate } from "./depixelate";
 
 // Fixed seed — mirrors the studio's seed=42 so blue-noise/flow/maze are stable.
 const SEED = 42;
@@ -207,7 +208,7 @@ function buildKnobs(): void {
   wrap.innerHTML = "";
   const style = styleById(state.styleId);
 
-  TONE_DITHER_PARAMS.forEach((p) => {
+  styleParams(style).forEach((p) => {
     if (p.key in style.fixed) return; // controlled by the Style selector — hidden
     const initial = paramValue(p);
     const row = document.createElement("div");
@@ -283,7 +284,7 @@ function buildKnobs(): void {
 
 function updateKnobVisibility(): void {
   const style = styleById(state.styleId);
-  TONE_DITHER_PARAMS.forEach((p) => {
+  styleParams(style).forEach((p) => {
     const row = document.getElementById(`knob-${p.key}`);
     if (!row || !p.visibleWhen) return;
     const dep = p.visibleWhen.param;
@@ -302,7 +303,7 @@ function updateKnobVisibility(): void {
 function gatherValues(): Record<string, ParamValue> {
   const style = styleById(state.styleId);
   const out: Record<string, ParamValue> = {};
-  TONE_DITHER_PARAMS.forEach((p) => {
+  styleParams(style).forEach((p) => {
     if (p.key in style.fixed) {
       out[p.key] = (style.fixed as Record<string, ParamValue>)[p.key];
       return;
@@ -318,6 +319,10 @@ function gatherValues(): Record<string, ParamValue> {
     else out[p.key] = inp.value;
   });
   return out;
+}
+
+function numParam(v: Record<string, ParamValue>, key: string, d: number): number {
+  return typeof v[key] === "number" ? (v[key] as number) : d;
 }
 
 function toRenderOptions(v: Record<string, ParamValue>): RenderOptions {
@@ -344,13 +349,14 @@ function toRenderOptions(v: Record<string, ParamValue>): RenderOptions {
 }
 
 // ── local rasterisation (replaces server resize + asset fetch) ─────────────────
-/** Draw the source into an offscreen canvas at the output size and read pixels. */
-function rasterizeSource(): Raster {
+/** Draw the source into an offscreen canvas at the output size and read pixels.
+ *  `fullRes` ignores the output-size setting (depixelate needs the native grid). */
+function rasterizeSource(fullRes = false): Raster {
   const { maxW, maxH, fit } = state.setup;
   const sw = state.sourceW;
   const sh = state.sourceH;
-  const mw = maxW && maxW > 0 ? maxW : null;
-  const mh = maxH && maxH > 0 ? maxH : null;
+  const mw = fullRes || !(maxW && maxW > 0) ? null : maxW;
+  const mh = fullRes || !(maxH && maxH > 0) ? null : maxH;
 
   let canvasW: number;
   let canvasH: number;
@@ -413,8 +419,19 @@ function renderFocus(): void {
   requestAnimationFrame(() => {
     if (!state.source) return;
     state.renderStart = performance.now();
-    const raster = rasterizeSource();
-    const res = renderToneDither(raster, toRenderOptions(gatherValues()));
+    const style = styleById(state.styleId);
+    const vals = gatherValues();
+    // Depixelate derives its own resolution from the full-res grid, so it must
+    // see the source at native size (not the output-downscaled raster).
+    const raster = rasterizeSource(style.renderer === "depixelate");
+    const res =
+      style.renderer === "depixelate"
+        ? renderDepixelate(raster, {
+            block: numParam(vals, "block", 2),
+            tau: numParam(vals, "tau", 45),
+            pitch: numParam(vals, "pitch", 0),
+          })
+        : renderToneDither(raster, toRenderOptions(vals));
     state.render = { w: res.width, h: res.height, idx: res.indices, palette: res.palette };
     state.hoverIdx = null;
 

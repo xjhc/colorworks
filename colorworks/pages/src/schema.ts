@@ -197,12 +197,52 @@ export const TONE_DITHER_PARAMS: ParamDef[] = [
   },
 ];
 
+/** Depixelate params (mirror of depixelate.py DEFINITION.parameters). */
+export const DEPIXELATE_PARAMS: ParamDef[] = [
+  {
+    key: "block",
+    label: "Tile size",
+    type: "int",
+    default: 2,
+    min: 2,
+    max: 6,
+    step: 1,
+    group: "pattern",
+  },
+  {
+    key: "tau",
+    label: "Mark threshold",
+    type: "int",
+    default: 45,
+    min: 0,
+    max: 255,
+    step: 1,
+    group: "pattern",
+  },
+  {
+    key: "pitch",
+    label: "Grid pitch (0 = auto)",
+    type: "int",
+    default: 0,
+    min: 0,
+    max: 64,
+    step: 1,
+    group: "pattern",
+  },
+];
+
+export type RendererId = "tone_dither" | "depixelate";
+
 export interface StyleDef {
   id: string;
   label: string;
   description: string;
+  /** Which renderer this style drives (defaults to tone_dither). */
+  renderer?: RendererId;
+  /** Which param set this style exposes (defaults to TONE_DITHER_PARAMS). */
+  params?: ParamDef[];
   /** Parameters fixed by this style (hidden from the knob list). */
-  fixed: { method: DitherMethod };
+  fixed: Record<string, string | number | boolean>;
 }
 
 /** Curated style set (mirrors quick_mode.CANDIDATES + the studio style picker). */
@@ -213,13 +253,26 @@ export const STYLES: StyleDef[] = [
   { id: "floyd_steinberg", label: "Floyd–Steinberg", description: "Error-diffused, fine texture", fixed: { method: "floyd_steinberg" } },
   { id: "maze", label: "Maze — labyrinth", description: "Connected diagonal labyrinth", fixed: { method: "maze" } },
   { id: "flat", label: "Flat poster — no dither", description: "Flat N-colour poster", fixed: { method: "flat" } },
+  {
+    id: "depixelate",
+    label: "Depixelate — recover grid",
+    description: "Recover the native pixel grid of an upscaled image; re-render each cell as a 2-colour dither tile",
+    renderer: "depixelate",
+    params: DEPIXELATE_PARAMS,
+    fixed: {},
+  },
 ];
 
 export const DEFAULT_STYLE_ID = "flow";
 
+/** The param set a style exposes (its own, or the tone-dither default). */
+export function styleParams(style: StyleDef): ParamDef[] {
+  return style.params ?? TONE_DITHER_PARAMS;
+}
+
 /** Convenience: the param defs keyed for lookup. */
 export const PARAM_BY_KEY: Record<string, ParamDef> = Object.fromEntries(
-  TONE_DITHER_PARAMS.map((p) => [p.key, p]),
+  [...TONE_DITHER_PARAMS, ...DEPIXELATE_PARAMS].map((p) => [p.key, p]),
 );
 
 export type { DitherMethod, PaletteMode };
