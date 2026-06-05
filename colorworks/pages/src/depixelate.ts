@@ -8,7 +8,7 @@
    per-cell two colours laid out by a Bayer-ordered dither whose density matches
    the cell's colour mix (block=2 midtone -> the o/x checkerboard).
    ========================================================================== */
-import type { Raster, RGB, RenderResult } from "./colorworks";
+import { buildTonePalette, type PaletteMode, type Raster, type RGB, type RenderResult } from "./colorworks";
 
 export interface Grid {
   pitchX: number;
@@ -18,10 +18,30 @@ export interface Grid {
   confidence: number;
 }
 
+/** "original" keeps the source colours (two dominant colours per cell, separated
+ *  by `tau`); the others quantise the image to a palette first. */
+export type DepixelatePalette = "original" | PaletteMode;
+
 export interface DepixelateOptions {
   block?: number; // tile size (2 = checkerboard)
-  tau?: number; // colour distance that registers a second colour
+  tau?: number; // colour distance that registers a second colour (original mode)
   pitch?: number; // 0 / undefined = auto-detect the upscale grid
+  palette?: DepixelatePalette; // colour treatment (default "original")
+  colors?: number; // palette size when quantising (default 4)
+  inkColor?: string; // duotone dark
+  paperColor?: string; // duotone light
+  /** Force >=1 minority subpixel for any qualifying second colour (preserves
+   *  sparse marks). Off = honest proportional fill, so near-solid cells stay
+   *  solid instead of always showing a dark/light pair. */
+  keepMarks?: boolean;
+}
+
+interface TileOptions {
+  tau?: number;
+  minFrac?: number;
+  keepMarks?: boolean;
+  palette?: RGB[]; // when set, cells are reduced over these palette indices
+  indices?: Uint8Array; // per-pixel nearest-palette index (paired with `palette`)
 }
 
 // ── grid detection ────────────────────────────────────────────────────────────
@@ -252,9 +272,92 @@ function windowMode(
   };
 }
 
+/** Map each source pixel to the nearest palette colour (returns per-pixel index). */
+export function quantizeToPalette(r: Raster, palette: RGB[]): Uint8Array {
+  const { width: W, height: H, data } = r;
+  const n = W * H;
+  const out = new Uint8Array(n);
+  for (let p = 0, i = 0; p < n; p++, i += 4) {
+    const R = data[i];
+    const G = data[i + 1];
+    const B = data[i + 2];
+    let best = 0;
+    let bd = Infinity;
+    for (let k = 0; k < palette.length; k++) {
+      const c = palette[k];
+      const dr = R - c[0];
+      const dg = G - c[1];
+      const db = B - c[2];
+      const d = dr * dr + dg * dg + db * db;
+      if (d < bd) {
+        bd = d;
+        best = k;
+      }
+    }
+    out[p] = best;
+  }
+  return out;
+}
+
+/** The two dominant colours of a cell, plus the minority fraction.
+ *  Over a palette-index map when `idx` is given, else over raw colours via `tau`. */
+function cellColors(
+  data: Uint8ClampedArray,
+  W: number,
+  x0: number,
+  x1: number,
+  y0: number,
+  y1: number,
+  minFrac: number,
+  tau: number,
+  palette?: RGB[],
+  idx?: Uint8Array,
+): { c0: RGB; c1: RGB; frac: number } {
+  if (palette && idx) {
+    const counts = new Map<number, number>();
+    let total = 0;
+    for (let y = y0; y <= y1; y++) {
+      const row = y * W;
+      for (let x = x0; x <= x1; x++) {
+        const k = idx[row + x];
+        counts.set(k, (counts.get(k) ?? 0) + 1);
+        total++;
+      }
+    }
+    let i0 = 0;
+    let n0 = -1;
+    let i1 = -1;
+    let n1 = -1;
+    for (const [k, n] of counts) {
+      if (n > n0) {
+        i1 = i0;
+        n1 = n0;
+        i0 = k;
+        n0 = n;
+      } else if (n > n1) {
+        i1 = k;
+        n1 = n;
+      }
+    }
+    const minCount = Math.max(2, Math.floor(minFrac * total));
+    const c0 = palette[i0];
+    const c1 = i1 >= 0 && n1 >= minCount ? palette[i1] : c0;
+    return { c0, c1, frac: (total - n0) / total };
+  }
+
+  const m0 = windowMode(data, W, x0, x1, y0, y1);
+  const total = m0.count;
+  const minCount = Math.max(2, Math.floor(minFrac * total));
+  const c0 = m0.colour;
+  const far = windowMode(data, W, x0, x1, y0, y1, (r2, g2, b2) => dist(r2, g2, b2, c0) > tau);
+  const c1 = far.count >= minCount ? far.colour : c0;
+  return { c0, c1, frac: far.count / total };
+}
+
 /** Render each grid cell as a block x block two-colour ordered-dither tile.
  *  Output raster is `block`x the native cell grid. */
-export function reduceToTiles(r: Raster, grid: Grid, block: number, tau: number, minFrac = 0.04): Raster {
+export function reduceToTiles(r: Raster, grid: Grid, block: number, opts: TileOptions = {}): Raster {
+  const { tau = 45, minFrac = 0.04, keepMarks = false, palette, indices } = opts;
   const { width: W, height: H, data } = r;
   const order = ditherOrder(block);
   const nSub = block * block;
@@ -277,19 +380,18 @@ export function reduceToTiles(r: Raster, grid: Grid, block: number, tau: number,
       const x0 = Math.max(0, cx - halfX);
       const x1 = Math.min(W - 1, cx + halfX);
 
-      const m0 = windowMode(data, W, x0, x1, y0, y1);
-      const c0 = m0.colour;
-      const total = m0.count;
-      const minCount = Math.max(2, Math.floor(minFrac * total));
-      const far = windowMode(data, W, x0, x1, y0, y1, (r2, g2, b2) => dist(r2, g2, b2, c0) > tau);
-      const c1: RGB = far.count >= minCount ? far.colour : c0;
+      const { c0, c1, frac } = cellColors(data, W, x0, x1, y0, y1, minFrac, tau, palette, indices);
 
       let on: number;
       if (c0[0] === c1[0] && c0[1] === c1[1] && c0[2] === c1[2]) {
-        on = 0; // solid cell -> uniform tile
+        on = 0; // single colour -> solid tile
       } else {
-        const frac = far.count / total;
-        on = Math.min(nSub - 1, Math.max(1, Math.round(frac * nSub)));
+        // Honest proportional fill: a near-solid cell rounds to 0 and stays solid
+        // (no forced dark/light pair). `keepMarks` re-floors it to 1 so a sparse
+        // mark (a star) survives instead of vanishing.
+        let base = Math.round(frac * nSub);
+        if (keepMarks) base = Math.max(1, base);
+        on = Math.min(nSub - 1, base);
       }
 
       for (let i = 0; i < block; i++) {
@@ -332,7 +434,9 @@ function rasterToIndexed(r: Raster): RenderResult {
 
 export function renderDepixelate(r: Raster, opts: DepixelateOptions = {}): RenderResult {
   const block = opts.block ?? 2;
-  const tau = opts.tau ?? 45;
+  const keepMarks = opts.keepMarks ?? false;
+  const palMode = opts.palette ?? "original";
+
   let grid: Grid;
   if (opts.pitch && opts.pitch > 0) {
     const { px, py } = edgeProfiles(r);
@@ -346,5 +450,14 @@ export function renderDepixelate(r: Raster, opts: DepixelateOptions = {}): Rende
   } else {
     grid = detectGrid(r);
   }
-  return rasterToIndexed(reduceToTiles(r, grid, block, tau));
+
+  let tiled: Raster;
+  if (palMode === "original") {
+    tiled = reduceToTiles(r, grid, block, { tau: opts.tau ?? 45, keepMarks });
+  } else {
+    const palette = buildTonePalette(r, opts.colors ?? 4, palMode, opts.inkColor, opts.paperColor, 42);
+    const indices = quantizeToPalette(r, palette);
+    tiled = reduceToTiles(r, grid, block, { keepMarks, palette, indices });
+  }
+  return rasterToIndexed(tiled);
 }

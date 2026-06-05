@@ -20,7 +20,7 @@ import {
   type Raster,
   type RenderOptions,
 } from "./colorworks";
-import { renderDepixelate } from "./depixelate";
+import { renderDepixelate, type DepixelateOptions } from "./depixelate";
 
 // Fixed seed — mirrors the studio's seed=42 so blue-noise/flow/maze are stable.
 const SEED = 42;
@@ -430,6 +430,11 @@ function renderFocus(): void {
             block: numParam(vals, "block", 2),
             tau: numParam(vals, "tau", 45),
             pitch: numParam(vals, "pitch", 0),
+            palette: vals.palette as DepixelateOptions["palette"],
+            colors: numParam(vals, "colors", 4),
+            inkColor: String(vals.ink_color ?? "#161616"),
+            paperColor: String(vals.paper_color ?? "#f4ebd9"),
+            keepMarks: vals.keep_marks === true,
           })
         : renderToneDither(raster, toRenderOptions(vals));
     state.render = { w: res.width, h: res.height, idx: res.indices, palette: res.palette };

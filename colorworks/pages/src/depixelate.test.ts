@@ -55,7 +55,7 @@ describe("depixelate", () => {
     const cells = nativeCells();
     const r = upscaled(cells, 10);
     const grid: Grid = { pitchX: 10, pitchY: 10, phaseX: 0, phaseY: 0, confidence: 1 };
-    const out = reduceToTiles(r, grid, 2, 45);
+    const out = reduceToTiles(r, grid, 2, { tau: 45 });
     expect(out.width).toBe(6 * 2);
     expect(out.height).toBe(6 * 2);
     // each solid cell -> uniform 2x2 tile; top-left subpixel recovers the native colour
@@ -71,7 +71,7 @@ describe("depixelate", () => {
     const r = upscaled(nativeCells(), 10);
     const grid: Grid = { pitchX: 10, pitchY: 10, phaseX: 0, phaseY: 0, confidence: 1 };
     for (const block of [2, 3, 4]) {
-      const out = reduceToTiles(r, grid, block, 45);
+      const out = reduceToTiles(r, grid, block, { tau: 45 });
       expect(out.width).toBe(6 * block);
       expect(out.height).toBe(6 * block);
     }
@@ -81,7 +81,7 @@ describe("depixelate", () => {
     // one cell spanning a black half and a white half
     const r = makeRaster(20, 10, (x) => (x < 10 ? [0, 0, 0] : [255, 255, 255]));
     const grid: Grid = { pitchX: 20, pitchY: 10, phaseX: 0, phaseY: 0, confidence: 1 };
-    const out = reduceToTiles(r, grid, 2, 45);
+    const out = reduceToTiles(r, grid, 2, { tau: 45 });
     expect(out.width).toBe(2);
     expect(out.height).toBe(2);
     const at = (x: number, y: number): RGB => {
@@ -91,6 +91,28 @@ describe("depixelate", () => {
     expect(at(0, 0)).toEqual(at(1, 1)); // diagonal equal
     expect(at(0, 1)).toEqual(at(1, 0)); // anti-diagonal equal
     expect(at(0, 0)).not.toEqual(at(0, 1)); // the two colours differ
+  });
+
+  it("keepMarks floors a sparse mark to 1 subpixel; off lets it stay solid", () => {
+    // one cell that is mostly black with a small (1/9) white mark
+    const r = makeRaster(30, 30, (x, y) => (x < 10 && y < 10 ? [255, 255, 255] : [0, 0, 0]));
+    const grid: Grid = { pitchX: 30, pitchY: 30, phaseX: 0, phaseY: 0, confidence: 1 };
+    const countWhite = (out: Raster): number => {
+      let n = 0;
+      for (let p = 0; p < out.width * out.height; p++) if (out.data[p * 4] > 200) n++;
+      return n;
+    };
+    // frac ~= 1/9 -> round(0.11*4)=0 -> proportional drops it; keepMarks re-floors to 1
+    expect(countWhite(reduceToTiles(r, grid, 2, { tau: 45, keepMarks: false }))).toBe(0);
+    expect(countWhite(reduceToTiles(r, grid, 2, { tau: 45, keepMarks: true }))).toBeGreaterThan(0);
+  });
+
+  it("quantises to a limited palette when a palette mode is given", () => {
+    const r = upscaled(nativeCells(), 10);
+    const res = renderDepixelate(r, { block: 2, pitch: 10, palette: "grayscale", colors: 3 });
+    // grayscale-3 palette -> at most 3 distinct colours in the output
+    expect(res.palette.length).toBeLessThanOrEqual(3);
+    for (const c of res.palette) expect(c[0]).toBe(c[1]); // gray: R==G==B
   });
 
   it("renderDepixelate returns an indexed result the studio can paint", () => {

@@ -7,6 +7,7 @@ from PIL import Image
 from colorworks.algorithms import MediaAsset, RenderContext
 from colorworks.algorithms.depixelate import (
     DepixelateRenderer,
+    Grid,
     detect_grid,
     depixelate,
     reduce_to_tiles,
@@ -89,7 +90,7 @@ async def test_renderer_end_to_end():
     up = upscale(native, 10)
     ctx = RenderContext(
         input=make_asset(up),
-        params={"block": 2, "tau": 45, "pitch": 10},
+        params={"block": 2, "tau": 45, "pitch": 10, "palette": "original"},
         composition=None,
         seed=0,
         store=ArtifactStore(),
@@ -102,3 +103,26 @@ async def test_renderer_end_to_end():
     assert art.type == "raster_image"
     assert isinstance(art.value, Image.Image)
     assert art.value.size == (12, 12)  # 6x6 cells, block=2
+
+
+def test_keep_marks_floor():
+    """Off: a sparse mark rounds to 0 (solid). On: re-floored to >=1 subpixel."""
+    native = np.zeros((30, 30, 3), np.uint8)
+    native[:10, :10] = [255, 255, 255]  # ~1/9 of a single cell is white
+    up = Image.fromarray(native, "RGB")
+    grid = Grid(pitch_x=30.0, pitch_y=30.0, phase_x=0.0, phase_y=0.0, confidence=1.0)
+
+    off = np.asarray(reduce_to_tiles(up, grid, block=2, tau=45, keep_marks=False))
+    on = np.asarray(reduce_to_tiles(up, grid, block=2, tau=45, keep_marks=True))
+    assert int((off[:, :, 0] > 200).sum()) == 0
+    assert int((on[:, :, 0] > 200).sum()) > 0
+
+
+def test_palette_quantization_limits_colours():
+    native = make_native()
+    up = upscale(native, 10)
+    out, _ = depixelate(up, reducer="tiles", block=2, pitch=10, palette="grayscale", colors=3)
+    arr = np.asarray(out).reshape(-1, 3)
+    uniq = np.unique(arr, axis=0)
+    assert uniq.shape[0] <= 3
+    assert np.all(uniq[:, 0] == uniq[:, 1])  # grayscale: R == G == B

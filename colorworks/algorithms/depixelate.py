@@ -20,6 +20,7 @@ import numpy as np
 from PIL import Image
 
 from colorworks.algorithms import StagedAlgorithm, registry, RenderContext
+from colorworks.algorithms.image_ops import parse_color
 from colorworks.domain import (
     AlgorithmDefinition,
     AlgorithmFamily,
@@ -28,6 +29,7 @@ from colorworks.domain import (
     OutputSpec,
     ParameterDef,
     ParameterType,
+    OptionDef,
     ArtifactKindDef,
     ArtifactViewerSpec,
     ExecutionProfile,
@@ -227,12 +229,28 @@ def _dither_order(n: int) -> np.ndarray:
     return np.argsort(np.argsort(sub)).reshape(n, n)
 
 
+def _cell_two_colors_indexed(
+    idx_cell: np.ndarray, palette: np.ndarray, min_count: int
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Two dominant palette colours of a cell from its palette-index window."""
+    counts = np.bincount(idx_cell, minlength=palette.shape[0])
+    o = np.argsort(counts)[::-1]
+    i0, i1 = int(o[0]), int(o[1]) if palette.shape[0] > 1 else int(o[0])
+    n0, n1, total = int(counts[i0]), int(counts[i1]), int(idx_cell.size)
+    c0 = palette[i0]
+    c1 = palette[i1] if (i1 != i0 and n1 >= min_count) else c0
+    return c0, c1, (total - n0) / total
+
+
 def reduce_to_tiles(
     image: Image.Image,
     grid: Grid,
     block: int = 2,
     tau: int = 45,
     min_frac: float = 0.04,
+    keep_marks: bool = False,
+    palette: np.ndarray | None = None,
+    indices: np.ndarray | None = None,
 ) -> Image.Image:
     """Render each grid cell as a `block` x `block` two-colour ordered-dither tile.
 
@@ -244,11 +262,14 @@ def reduce_to_tiles(
       - solid cell            -> uniform tile (all c0)
       - midtone two-colour    -> checkerboard-like spread (at block=2, f~0.5, the
                                  classic ``c0 c1 / c1 c0``)
-      - sparse mark on bg     -> at least one c1 subpixel (never voted away)
 
-    `block` is the configurable tile size (2, 3, 4 ...); `tau` is the colour
-    distance that counts as a second colour; `min_frac` is the cell fraction it
-    must cover to register as a mark.
+    With honest proportional fill a near-solid cell rounds to 0 and stays solid.
+    `keep_marks=True` re-floors it to one c1 subpixel so a sparse mark (a star)
+    survives instead of vanishing. When `palette`/`indices` are given the two cell
+    colours are taken over the quantised palette; otherwise raw colours via `tau`.
+
+    `block` is the configurable tile size; `tau` is the colour distance that counts
+    as a second colour; `min_frac` is the cell fraction it must cover.
     """
     arr = np.asarray(image)
     H, W = arr.shape[:2]
@@ -279,13 +300,24 @@ def reduce_to_tiles(
             if cell.size == 0:
                 continue
             flat = cell.reshape(-1, C)
-            c0, c1 = _two_colors(flat, tau, max(2, int(min_frac * flat.shape[0])))
+            n_px = flat.shape[0]
+            min_count = max(2, int(min_frac * n_px))
+
+            if palette is not None and indices is not None:
+                c0, c1, frac = _cell_two_colors_indexed(
+                    indices[y0:y1, x0:x1].ravel(), palette, min_count
+                )
+            else:
+                c0, c1 = _two_colors(flat, tau, min_count)
+                frac = float(np.mean(np.abs(flat.astype(np.int32) - c0).max(1) > tau))
 
             if np.array_equal(c0, c1):
-                on = 0                                  # solid cell -> uniform tile
+                on = 0                                  # single colour -> solid tile
             else:
-                frac = float(np.mean(np.abs(flat.astype(np.int32) - c0).max(1) > tau))
-                on = int(np.clip(round(frac * n_sub), 1, n_sub - 1))  # keep both colours
+                base = round(frac * n_sub)
+                if keep_marks:
+                    base = max(1, base)                 # preserve a sparse mark
+                on = int(np.clip(base, 0, n_sub - 1))
 
             tile = np.where((order < on)[:, :, None], c1, c0).astype(arr.dtype)
             out[ro:ro + block, c * block:c * block + block] = tile
@@ -294,6 +326,31 @@ def reduce_to_tiles(
     if C == 1:
         out = out[:, :, 0]
     return Image.fromarray(out, mode=mode)
+
+
+def _build_palette(image: Image.Image, colors: int, mode: str, ink: str, paper: str) -> np.ndarray:
+    """Build an (N, 3) uint8 palette matching the studio's palette modes."""
+    colors = max(2, int(colors))
+    if mode == "grayscale":
+        ramp = np.linspace(0, 255, colors)
+        return np.stack([ramp, ramp, ramp], axis=1).round().astype(np.uint8)
+    if mode == "duotone":
+        a = np.array(parse_color(ink), dtype=np.float64)
+        b = np.array(parse_color(paper), dtype=np.float64)
+        t = np.linspace(0, 1, colors)[:, None]
+        return (a * (1 - t) + b * t).round().astype(np.uint8)
+    pal_img = image.convert("RGB").quantize(
+        colors=colors, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE
+    )
+    pal = np.asarray(pal_img.getpalette()[: colors * 3], dtype=np.uint8).reshape(-1, 3)
+    return pal
+
+
+def _quantize_to_palette(arr: np.ndarray, palette: np.ndarray) -> np.ndarray:
+    """Per-pixel nearest-palette index for an (H, W, 3) array."""
+    a = arr.reshape(-1, 1, 3).astype(np.int32)
+    p = palette.reshape(1, -1, 3).astype(np.int32)
+    return ((a - p) ** 2).sum(2).argmin(1).reshape(arr.shape[:2]).astype(np.int32)
 
 
 # Reducers that need to preserve sub-cell marks scan a wider window than the
@@ -385,6 +442,11 @@ def depixelate(
     pitch: float | None = None,
     block: int = 2,
     tau: int = 45,
+    palette: str = "original",
+    colors: int = 4,
+    ink_color: str = "#161616",
+    paper_color: str = "#f4ebd9",
+    keep_marks: bool = False,
 ) -> tuple[Image.Image, Grid]:
     """Convenience: detect grid (or use an explicit `pitch`) + reduce.
 
@@ -392,10 +454,11 @@ def depixelate(
     ordered-dither tile (output is `block`x the native grid); any other reducer
     collapses each cell to a single pixel via `reduce_to_native`.
 
-    Pass `pitch` to override auto-detection -- useful on multi-grid images where
-    the subject sprite, dither field and UI chrome each sit on a different pitch
-    and "which grid" is a creative choice. Phase is still solved for the given
-    pitch. Returns (native_image, grid).
+    palette="original" keeps source colours (two-dominant via `tau`); "adaptive" /
+    "grayscale" / "duotone" quantise to a `colors`-entry palette first. `keep_marks`
+    re-floors a sparse cell to one minority subpixel so it isn't dropped.
+
+    Pass `pitch` to override auto-detection. Returns (native_image, grid).
     """
     if pitch is not None:
         px_prof, py_prof = _edge_profiles(image)
@@ -404,10 +467,17 @@ def depixelate(
         grid = Grid(float(pitch), float(pitch), phx, phy, 1.0)
     else:
         grid = detect_grid(image)
-    if reducer in ("tiles", "checker"):
-        native = reduce_to_tiles(image, grid, block=block, tau=tau)
+
+    if reducer not in ("tiles", "checker"):
+        return reduce_to_native(image, grid, reducer=reducer, tau=tau), grid
+
+    if palette == "original":
+        native = reduce_to_tiles(image, grid, block=block, tau=tau, keep_marks=keep_marks)
     else:
-        native = reduce_to_native(image, grid, reducer=reducer, tau=tau)
+        rgb = image.convert("RGB")
+        pal = _build_palette(rgb, colors, palette, ink_color, paper_color)
+        idx = _quantize_to_palette(np.asarray(rgb), pal)
+        native = reduce_to_tiles(rgb, grid, block=block, keep_marks=keep_marks, palette=pal, indices=idx)
     return native, grid
 
 
@@ -436,6 +506,58 @@ DEFINITION = AlgorithmDefinition(
             step=1,
             group="tiles",
             description="Each recovered cell becomes a block×block ordered-dither tile. 2 = the o/x checkerboard; larger gives more tonal levels.",
+            invalidates=["final_raster"],
+        ),
+        ParameterDef(
+            "palette",
+            "Palette",
+            ParameterType.STR,
+            default="adaptive",
+            options=[
+                OptionDef(value="original", label="Original colors"),
+                OptionDef(value="adaptive", label="Adaptive (from image)"),
+                OptionDef(value="grayscale", label="Grayscale"),
+                OptionDef(value="duotone", label="Duotone (ink → paper)"),
+            ],
+            group="palette",
+            description="Original keeps source colours; the others quantise to a limited palette first.",
+            invalidates=["final_raster"],
+        ),
+        ParameterDef(
+            "colors",
+            "Colors",
+            ParameterType.INT,
+            default=4,
+            min=2,
+            max=8,
+            step=1,
+            group="palette",
+            description="Palette size when quantising (ignored for Original colors).",
+            invalidates=["final_raster"],
+        ),
+        ParameterDef(
+            "ink_color",
+            "Ink Color (duotone)",
+            ParameterType.STR,
+            default="#161616",
+            group="palette",
+            invalidates=["final_raster"],
+        ),
+        ParameterDef(
+            "paper_color",
+            "Paper Color (duotone)",
+            ParameterType.STR,
+            default="#f4ebd9",
+            group="palette",
+            invalidates=["final_raster"],
+        ),
+        ParameterDef(
+            "keep_marks",
+            "Keep sparse marks",
+            ParameterType.BOOL,
+            default=False,
+            group="tiles",
+            description="Force a minority subpixel for any second colour, so faint dots/stars survive. Off keeps near-solid cells solid (no forced dark/light pair).",
             invalidates=["final_raster"],
         ),
         ParameterDef(
@@ -504,6 +626,11 @@ class DepixelateRenderer(StagedAlgorithm):
         block = int(ctx.params.get("block", 2))
         tau = int(ctx.params.get("tau", 45))
         pitch = int(ctx.params.get("pitch", 0))
+        palette = str(ctx.params.get("palette", "adaptive"))
+        colors = int(ctx.params.get("colors", 4))
+        ink_color = str(ctx.params.get("ink_color", "#161616"))
+        paper_color = str(ctx.params.get("paper_color", "#f4ebd9"))
+        keep_marks = bool(ctx.params.get("keep_marks", False))
 
         img = ctx.input.image.convert("RGB")
         native, _grid = depixelate(
@@ -512,6 +639,11 @@ class DepixelateRenderer(StagedAlgorithm):
             block=block,
             tau=tau,
             pitch=pitch if pitch > 0 else None,
+            palette=palette,
+            colors=colors,
+            ink_color=ink_color,
+            paper_color=paper_color,
+            keep_marks=keep_marks,
         )
         ctx.store.publish("final_raster", native)
 
