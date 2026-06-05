@@ -34,12 +34,16 @@ export interface DepixelateOptions {
    *  sparse marks). Off = honest proportional fill, so near-solid cells stay
    *  solid instead of always showing a dark/light pair. */
   keepMarks?: boolean;
+  /** Scales coverage -> lit subpixels. 1 = proportional (25%->1/4); 2 fills
+   *  twice as fast (12.5%->1/4, 25%->2/4). */
+  fillMult?: number;
 }
 
 interface TileOptions {
   tau?: number;
   minFrac?: number;
   keepMarks?: boolean;
+  fillMult?: number; // scales coverage -> lit subpixels (1 = proportional)
   palette?: RGB[]; // when set, cells are reduced over these palette indices
   indices?: Uint8Array; // per-pixel nearest-palette index (paired with `palette`)
 }
@@ -357,7 +361,7 @@ function cellColors(
 /** Render each grid cell as a block x block two-colour ordered-dither tile.
  *  Output raster is `block`x the native cell grid. */
 export function reduceToTiles(r: Raster, grid: Grid, block: number, opts: TileOptions = {}): Raster {
-  const { tau = 45, minFrac = 0.04, keepMarks = false, palette, indices } = opts;
+  const { tau = 45, minFrac = 0.04, keepMarks = false, fillMult = 1, palette, indices } = opts;
   const { width: W, height: H, data } = r;
   const order = ditherOrder(block);
   const nSub = block * block;
@@ -386,10 +390,10 @@ export function reduceToTiles(r: Raster, grid: Grid, block: number, opts: TileOp
       if (c0[0] === c1[0] && c0[1] === c1[1] && c0[2] === c1[2]) {
         on = 0; // single colour -> solid tile
       } else {
-        // Honest proportional fill: a near-solid cell rounds to 0 and stays solid
-        // (no forced dark/light pair). `keepMarks` re-floors it to 1 so a sparse
-        // mark (a star) survives instead of vanishing.
-        let base = Math.round(frac * nSub);
+        // Coverage -> lit subpixels. fillMult scales how fast coverage fills the
+        // tile (1 = honest proportional). A near-solid cell rounds to 0 and stays
+        // solid; `keepMarks` re-floors it to 1 so a sparse mark survives.
+        let base = Math.round(frac * nSub * fillMult);
         if (keepMarks) base = Math.max(1, base);
         on = Math.min(nSub - 1, base);
       }
@@ -435,6 +439,7 @@ function rasterToIndexed(r: Raster): RenderResult {
 export function renderDepixelate(r: Raster, opts: DepixelateOptions = {}): RenderResult {
   const block = opts.block ?? 2;
   const keepMarks = opts.keepMarks ?? false;
+  const fillMult = opts.fillMult ?? 1;
   const palMode = opts.palette ?? "original";
 
   let grid: Grid;
@@ -453,11 +458,11 @@ export function renderDepixelate(r: Raster, opts: DepixelateOptions = {}): Rende
 
   let tiled: Raster;
   if (palMode === "original") {
-    tiled = reduceToTiles(r, grid, block, { tau: opts.tau ?? 45, keepMarks });
+    tiled = reduceToTiles(r, grid, block, { tau: opts.tau ?? 45, keepMarks, fillMult });
   } else {
     const palette = buildTonePalette(r, opts.colors ?? 4, palMode, opts.inkColor, opts.paperColor, 42);
     const indices = quantizeToPalette(r, palette);
-    tiled = reduceToTiles(r, grid, block, { keepMarks, palette, indices });
+    tiled = reduceToTiles(r, grid, block, { keepMarks, fillMult, palette, indices });
   }
   return rasterToIndexed(tiled);
 }

@@ -107,6 +107,19 @@ describe("depixelate", () => {
     expect(countWhite(reduceToTiles(r, grid, 2, { tau: 45, keepMarks: true }))).toBeGreaterThan(0);
   });
 
+  it("fillMult scales how fast coverage lights subpixels", () => {
+    // a single cell that is ~30% white
+    const r = makeRaster(20, 20, (_x, y) => (y < 6 ? [255, 255, 255] : [0, 0, 0]));
+    const grid: Grid = { pitchX: 20, pitchY: 20, phaseX: 0, phaseY: 0, confidence: 1 };
+    const whites = (m: number): number => {
+      const out = reduceToTiles(r, grid, 2, { tau: 45, fillMult: m });
+      let n = 0;
+      for (let p = 0; p < out.width * out.height; p++) if (out.data[p * 4] > 200) n++;
+      return n;
+    };
+    expect(whites(2)).toBeGreaterThan(whites(1)); // 2x fills more for the same coverage
+  });
+
   it("quantises to a limited palette when a palette mode is given", () => {
     const r = upscaled(nativeCells(), 10);
     const res = renderDepixelate(r, { block: 2, pitch: 10, palette: "grayscale", colors: 3 });

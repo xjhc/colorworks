@@ -118,6 +118,20 @@ def test_keep_marks_floor():
     assert int((on[:, :, 0] > 200).sum()) > 0
 
 
+def test_fill_multiplier_scales_fill():
+    """2x fills more subpixels than 1x for the same cell coverage."""
+    native = np.zeros((20, 20, 3), np.uint8)
+    native[:6] = 255  # ~30% white in a single cell
+    up = Image.fromarray(native, "RGB")
+    grid = Grid(pitch_x=20.0, pitch_y=20.0, phase_x=0.0, phase_y=0.0, confidence=1.0)
+
+    def whites(m: float) -> int:
+        out = np.asarray(reduce_to_tiles(up, grid, block=2, tau=45, fill_mult=m))
+        return int((out[:, :, 0] > 200).sum())
+
+    assert whites(2.0) > whites(1.0)
+
+
 def test_palette_quantization_limits_colours():
     native = make_native()
     up = upscale(native, 10)

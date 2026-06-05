@@ -249,6 +249,7 @@ def reduce_to_tiles(
     tau: int = 45,
     min_frac: float = 0.04,
     keep_marks: bool = False,
+    fill_mult: float = 1.0,
     palette: np.ndarray | None = None,
     indices: np.ndarray | None = None,
 ) -> Image.Image:
@@ -314,7 +315,7 @@ def reduce_to_tiles(
             if np.array_equal(c0, c1):
                 on = 0                                  # single colour -> solid tile
             else:
-                base = round(frac * n_sub)
+                base = round(frac * n_sub * fill_mult)  # coverage -> lit subpixels
                 if keep_marks:
                     base = max(1, base)                 # preserve a sparse mark
                 on = int(np.clip(base, 0, n_sub - 1))
@@ -447,6 +448,7 @@ def depixelate(
     ink_color: str = "#161616",
     paper_color: str = "#f4ebd9",
     keep_marks: bool = False,
+    fill_mult: float = 1.0,
 ) -> tuple[Image.Image, Grid]:
     """Convenience: detect grid (or use an explicit `pitch`) + reduce.
 
@@ -472,12 +474,14 @@ def depixelate(
         return reduce_to_native(image, grid, reducer=reducer, tau=tau), grid
 
     if palette == "original":
-        native = reduce_to_tiles(image, grid, block=block, tau=tau, keep_marks=keep_marks)
+        native = reduce_to_tiles(image, grid, block=block, tau=tau, keep_marks=keep_marks, fill_mult=fill_mult)
     else:
         rgb = image.convert("RGB")
         pal = _build_palette(rgb, colors, palette, ink_color, paper_color)
         idx = _quantize_to_palette(np.asarray(rgb), pal)
-        native = reduce_to_tiles(rgb, grid, block=block, keep_marks=keep_marks, palette=pal, indices=idx)
+        native = reduce_to_tiles(
+            rgb, grid, block=block, keep_marks=keep_marks, fill_mult=fill_mult, palette=pal, indices=idx
+        )
     return native, grid
 
 
@@ -549,6 +553,18 @@ DEFINITION = AlgorithmDefinition(
             ParameterType.STR,
             default="#f4ebd9",
             group="palette",
+            invalidates=["final_raster"],
+        ),
+        ParameterDef(
+            "fill_mult",
+            "Fill multiplier",
+            ParameterType.FLOAT,
+            default=1.0,
+            min=0.25,
+            max=4.0,
+            step=0.25,
+            group="tiles",
+            description="Scales how fast a cell's coverage lights tile subpixels. 1× = proportional (25%→1/4); 2× fills twice as fast (12.5%→1/4).",
             invalidates=["final_raster"],
         ),
         ParameterDef(
@@ -631,6 +647,7 @@ class DepixelateRenderer(StagedAlgorithm):
         ink_color = str(ctx.params.get("ink_color", "#161616"))
         paper_color = str(ctx.params.get("paper_color", "#f4ebd9"))
         keep_marks = bool(ctx.params.get("keep_marks", False))
+        fill_mult = float(ctx.params.get("fill_mult", 1.0))
 
         img = ctx.input.image.convert("RGB")
         native, _grid = depixelate(
@@ -644,6 +661,7 @@ class DepixelateRenderer(StagedAlgorithm):
             ink_color=ink_color,
             paper_color=paper_color,
             keep_marks=keep_marks,
+            fill_mult=fill_mult,
         )
         ctx.store.publish("final_raster", native)
 

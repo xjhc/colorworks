@@ -252,6 +252,16 @@ export const DEPIXELATE_PARAMS: ParamDef[] = [
     visibleWhen: { param: "palette", equals: ["duotone"] },
   },
   {
+    key: "fill_mult",
+    label: "Fill multiplier",
+    type: "float",
+    default: 1,
+    min: 0.25,
+    max: 4,
+    step: 0.25,
+    group: "pattern",
+  },
+  {
     key: "keep_marks",
     label: "Keep sparse marks",
     type: "bool",

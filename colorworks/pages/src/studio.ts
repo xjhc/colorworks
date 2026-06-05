@@ -435,6 +435,7 @@ function renderFocus(): void {
             inkColor: String(vals.ink_color ?? "#161616"),
             paperColor: String(vals.paper_color ?? "#f4ebd9"),
             keepMarks: vals.keep_marks === true,
+            fillMult: numParam(vals, "fill_mult", 1),
           })
         : renderToneDither(raster, toRenderOptions(vals));
     state.render = { w: res.width, h: res.height, idx: res.indices, palette: res.palette };
