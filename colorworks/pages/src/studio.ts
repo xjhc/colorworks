@@ -21,6 +21,7 @@ import {
   type RenderOptions,
 } from "./colorworks";
 import { renderDepixelate, type DepixelateOptions } from "./depixelate";
+import { boxFit, conformIndexed, type FitMode } from "./output_size";
 
 // Fixed seed — mirrors the studio's seed=42 so blue-noise/flow/maze are stable.
 const SEED = 42;
@@ -35,7 +36,6 @@ function $$(sel: string): HTMLElement[] {
   return Array.from(document.querySelectorAll(sel));
 }
 
-type FitMode = "fit" | "cover" | "stretch";
 type ParamValue = string | number | boolean;
 
 interface RenderState {
@@ -357,42 +357,7 @@ function rasterizeSource(fullRes = false): Raster {
   const sh = state.sourceH;
   const mw = fullRes || !(maxW && maxW > 0) ? null : maxW;
   const mh = fullRes || !(maxH && maxH > 0) ? null : maxH;
-
-  let canvasW: number;
-  let canvasH: number;
-  let drawW: number;
-  let drawH: number;
-  let dx = 0;
-  let dy = 0;
-
-  if (mw === null && mh === null) {
-    canvasW = drawW = sw;
-    canvasH = drawH = sh;
-  } else if (fit === "stretch") {
-    canvasW = drawW = mw ?? sw;
-    canvasH = drawH = mh ?? sh;
-  } else {
-    let scale: number;
-    if (mw !== null && mh !== null) {
-      scale = fit === "fit" ? Math.min(mw / sw, mh / sh) : Math.max(mw / sw, mh / sh);
-    } else if (mw !== null) {
-      scale = mw / sw;
-    } else {
-      scale = (mh as number) / sh;
-    }
-    if (fit === "fit" && scale >= 1) scale = 1; // never upscale in fit mode
-    drawW = Math.max(1, Math.round(sw * scale));
-    drawH = Math.max(1, Math.round(sh * scale));
-    if (fit === "cover" && mw !== null && mh !== null) {
-      canvasW = mw;
-      canvasH = mh;
-      dx = Math.round((mw - drawW) / 2); // ≤ 0 → centre-crop
-      dy = Math.round((mh - drawH) / 2);
-    } else {
-      canvasW = drawW;
-      canvasH = drawH;
-    }
-  }
+  const { canvasW, canvasH, drawW, drawH, dx, dy } = boxFit(sw, sh, mw, mh, fit, false);
 
   const cv = state.offscreen ?? (state.offscreen = document.createElement("canvas"));
   cv.width = canvasW;
@@ -424,7 +389,7 @@ function renderFocus(): void {
     // Depixelate derives its own resolution from the full-res grid, so it must
     // see the source at native size (not the output-downscaled raster).
     const raster = rasterizeSource(style.renderer === "depixelate");
-    const res =
+    let res =
       style.renderer === "depixelate"
         ? renderDepixelate(raster, {
             block: numParam(vals, "block", 2),
@@ -438,6 +403,13 @@ function renderFocus(): void {
             fillMult: numParam(vals, "fill_mult", 1),
           })
         : renderToneDither(raster, toRenderOptions(vals));
+    // Depixelate detects + tiles on the native grid, so its raw output size is
+    // decoupled from the output-size control; scale it to the requested size so
+    // the preview and exported PNG honour it (other renderers already do).
+    if (style.renderer === "depixelate") {
+      const { maxW, maxH, fit } = state.setup;
+      res = conformIndexed(res, maxW && maxW > 0 ? maxW : null, maxH && maxH > 0 ? maxH : null, fit);
+    }
     state.render = { w: res.width, h: res.height, idx: res.indices, palette: res.palette };
     state.hoverIdx = null;
 
