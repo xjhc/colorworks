@@ -214,3 +214,34 @@ describe("repixel — recovery", () => {
     for (const ix of res.indices) expect(ix).toBeLessThan(res.palette.length);
   });
 });
+
+describe("repixel — composite target", () => {
+  // Braille grey dot field (7px fine lattice) everywhere, with a solid colour
+  // sprite block overlaid in the centre. The composite target must keep the fine
+  // background dots AND repaint the sprite region in its own colour — the two
+  // scales a single-grid target cannot hold at once.
+  function scene(): Raster {
+    const grey: RGB = [190, 190, 190];
+    const salmon: RGB = [210, 95, 65];
+    return makeRaster(112, 112, (x, y) => {
+      if (x >= 40 && x < 72 && y >= 40 && y < 72) return salmon; // colour sprite block
+      const ux = x % 7;
+      const uy = y % 7;
+      return (ux === 1 || ux === 2) && (uy === 1 || uy === 2) ? grey : BG; // braille dots
+    });
+  }
+
+  it("recovers the braille background AND overlays the colour sprite", () => {
+    const res = renderRepixel(scene(), { target: "composite", shade: false, bgMode: "custom", bgColor: "#141414" });
+    expect(res.width).toBeGreaterThanOrEqual(14); // fine 7px lattice → ~16 cols
+    let grey = 0;
+    let salmon = 0;
+    for (let i = 0; i < res.indices.length; i++) {
+      const c = res.palette[res.indices[i]];
+      if (Math.abs(c[0] - c[1]) < 25 && Math.abs(c[1] - c[2]) < 25 && c[0] > 140) grey++; // braille dot
+      if (c[0] > 150 && c[0] > c[2] + 40) salmon++; // sprite ink
+    }
+    expect(grey).toBeGreaterThan(20); // background dots recovered outside the sprite
+    expect(salmon).toBeGreaterThan(4); // sprite block overlaid in its own colour
+  });
+});

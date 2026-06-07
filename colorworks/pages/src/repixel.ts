@@ -48,9 +48,13 @@ export type BgMode = "auto" | "custom";
  *  - "fine":    luminance detector → the dense glyph/braille lattice (background).
  *  - "subject": saturation detector → the dominant colour sprite (foreground).
  *  - "manual":  use the `pitch` override.
+ *  - "composite": BOTH at once — recover the background on the fine lattice and the
+ *                 colour sprite on its own (coarser) subject grid, then composite the
+ *                 sprite over the background. The fine grid is finer than the sprite
+ *                 pixel, so the overlay is loss-free.
  *  There is no single "real" pixel size when a sprite and a dither field coexist;
  *  the caller picks which scale this render targets. */
-export type PixelTarget = "fine" | "subject" | "manual";
+export type PixelTarget = "fine" | "subject" | "manual" | "composite";
 
 export interface RepixelOptions {
   target?: PixelTarget; // which scale to detect (default "fine"; "manual" uses pitch)
@@ -67,6 +71,9 @@ export interface RepixelOptions {
   paperColor?: string; // duotone light
   bgMode?: BgMode; // "auto" detects the modal colour; "custom" uses bgColor (default "auto")
   bgColor?: string; // background when bgMode = "custom" (default "#181818")
+  // composite target only:
+  spriteSat?: number; // relative saturation (max-min)/max above which a pixel is "sprite" (default 0.3)
+  eyeLuma?: number; // luma below which a body-interior pixel is a dark eye (default 45)
 }
 
 // ── grid detection ──────────────────────────────────────────────────────────
@@ -285,6 +292,7 @@ function recover(r: Raster, opts: RepixelOptions): Recovery {
   // Default target: explicit, else "manual" when a pitch override is given
   // (back-compat — bare `pitch` still forces manual), else the fine lattice.
   const target: PixelTarget = opts.target ?? (hasPitch ? "manual" : "fine");
+  if (target === "composite") return recoverComposite(r, opts);
 
   let grid: Grid;
   if (target === "manual" && hasPitch) {
@@ -349,6 +357,146 @@ function recover(r: Raster, opts: RepixelOptions): Recovery {
     }
   }
   return { width: nCols, height: nRows, data: out, coverage, bg, litColors };
+}
+
+// ── composite (multi-grid): braille background + colour sprite ────────────────
+
+/** Fill enclosed holes in a binary mask: flood the NON-mask region inward from the
+ *  border; any non-mask pixel the flood can't reach is an interior hole. Mirrors
+ *  scipy.ndimage.binary_fill_holes — turns the sprite outline into a solid body so
+ *  dark interior pixels (eyes) can be told apart from the outside background. */
+function fillHoles(mask: Uint8Array, W: number, H: number): Uint8Array {
+  const reach = new Uint8Array(W * H);
+  const stack: number[] = [];
+  const push = (p: number) => {
+    if (!mask[p] && !reach[p]) { reach[p] = 1; stack.push(p); }
+  };
+  for (let x = 0; x < W; x++) { push(x); push((H - 1) * W + x); }
+  for (let y = 0; y < H; y++) { push(y * W); push(y * W + W - 1); }
+  while (stack.length) {
+    const p = stack.pop() as number;
+    const x = p % W, y = (p / W) | 0;
+    if (x > 0) push(p - 1);
+    if (x < W - 1) push(p + 1);
+    if (y > 0) push(p - W);
+    if (y < H - 1) push(p + W);
+  }
+  const body = new Uint8Array(W * H);
+  for (let p = 0; p < W * H; p++) body[p] = mask[p] || !reach[p] ? 1 : 0;
+  return body;
+}
+
+/** 8-neighbour binary erosion by `iters` — shrinks a mask inward so the eye
+ *  detector stays off the silhouette boundary. */
+function erode(mask: Uint8Array, W: number, H: number, iters: number): Uint8Array {
+  let cur = mask;
+  for (let it = 0; it < iters; it++) {
+    const next = new Uint8Array(W * H);
+    for (let y = 1; y < H - 1; y++) {
+      for (let x = 1; x < W - 1; x++) {
+        const p = y * W + x;
+        if (cur[p] && cur[p - 1] && cur[p + 1] && cur[p - W] && cur[p + W] &&
+            cur[p - W - 1] && cur[p - W + 1] && cur[p + W - 1] && cur[p + W + 1]) next[p] = 1;
+      }
+    }
+    cur = next;
+  }
+  return cur;
+}
+
+interface SpriteMasks { body: Uint8Array; eye: Uint8Array; lum: Float32Array; }
+
+/** Per-region masks for the colour sprite: a filled body silhouette and its
+ *  near-black interior eye pixels. NB eyes are found by LOW LUMA, not colour —
+ *  on near-black pixels saturation is unreliable (tiny channel noise reads as
+ *  fully saturated), which would wrongly classify an eye as coloured sprite. */
+function spriteMasks(r: Raster, satThr: number, eyeLuma: number): SpriteMasks {
+  const { width: W, height: H, data } = r;
+  const lum = new Float32Array(W * H);
+  const fg = new Uint8Array(W * H);
+  for (let p = 0, i = 0; p < W * H; p++, i += 4) {
+    const R = data[i], G = data[i + 1], B = data[i + 2];
+    const mx = Math.max(R, G, B);
+    lum[p] = 0.299 * R + 0.587 * G + 0.114 * B;
+    // RELATIVE saturation (max-min)/max, not absolute: shadowed sprite stays
+    // foreground so the silhouette fully encloses the eyes (absolute saturation
+    // leaves gaps in dark sprite, letting the hole-fill leak into the eyes).
+    if (mx > 0 && (mx - Math.min(R, G, B)) / mx > satThr) fg[p] = 1;
+  }
+  const body = fillHoles(fg, W, H);
+  const inner = erode(body, W, H, 2);
+  const eye = new Uint8Array(W * H);
+  for (let p = 0; p < W * H; p++) if (inner[p] && lum[p] < eyeLuma) eye[p] = 1;
+  return { body, eye, lum };
+}
+
+interface SpriteArt { cols: number; rows: number; ox: number; oy: number; px: number; py: number; cells: (RGB | null)[]; }
+
+/** Snap the sprite to its OWN (subject) grid: one clean colour per native pixel,
+ *  black where an eye sits, null outside the body. Body colour is the mean of the
+ *  non-dark body pixels in the cell (excludes filled eye-holes). */
+function regridSprite(r: Raster, grid: Grid, m: SpriteMasks, bodyThr: number, eyeThr: number, eyeLuma: number): SpriteArt {
+  const { width: W, height: H, data } = r;
+  const { pitchX: px, pitchY: py } = grid;
+  const [ox, oy] = gridOrigin(grid);
+  const cols = Math.max(1, Math.round((W - ox) / px));
+  const rows = Math.max(1, Math.round((H - oy) / py));
+  const cells: (RGB | null)[] = new Array(cols * rows).fill(null);
+  for (let j = 0; j < rows; j++) {
+    const y0 = Math.max(0, Math.round(oy + j * py));
+    const y1 = Math.min(H - 1, Math.round(oy + (j + 1) * py) - 1);
+    for (let i = 0; i < cols; i++) {
+      const x0 = Math.max(0, Math.round(ox + i * px));
+      const x1 = Math.min(W - 1, Math.round(ox + (i + 1) * px) - 1);
+      let bodyN = 0, eyeN = 0, area = 0, sr = 0, sg = 0, sb = 0, n = 0;
+      for (let y = y0; y <= y1; y++) {
+        const row = y * W;
+        for (let x = x0; x <= x1; x++) {
+          const p = row + x; area++;
+          if (m.body[p]) bodyN++;
+          if (m.eye[p]) eyeN++;
+          if (m.body[p] && m.lum[p] >= eyeLuma) { const i4 = p * 4; sr += data[i4]; sg += data[i4 + 1]; sb += data[i4 + 2]; n++; }
+        }
+      }
+      if (area === 0 || bodyN / area < bodyThr) continue;                 // outside body
+      if (eyeN / area > eyeThr) { cells[j * cols + i] = [0, 0, 0]; continue; } // eye → black
+      cells[j * cols + i] = n ? [Math.round(sr / n), Math.round(sg / n), Math.round(sb / n)] : null;
+    }
+  }
+  return { cols, rows, ox, oy, px, py, cells };
+}
+
+/** Composite recovery: background on the fine lattice, the colour sprite snapped to
+ *  its own subject grid and overlaid wherever the body silhouette covers a cell. */
+function recoverComposite(r: Raster, opts: RepixelOptions): Recovery {
+  const satThr = opts.spriteSat ?? 0.3;
+  const eyeLuma = opts.eyeLuma ?? 45;
+  const { width: W, height: H } = r;
+  // Background is a dither FIELD, not tone-modulated halftone, so recover it crisp
+  // (two-tone) — area-averaging (shade) collapses a dark dot field to near-black.
+  const fine = recover(r, { ...opts, target: "fine", shade: false });
+  const m = spriteMasks(r, satThr, eyeLuma);
+  const art = regridSprite(r, detectSubjectGrid(r), m, 0.45, 0.25, eyeLuma);
+  const fineGrid = detectGrid(r);
+  const [ox, oy] = gridOrigin(fineGrid);
+  const { pitchX: px, pitchY: py } = fineGrid;
+  for (let rr = 0; rr < fine.height; rr++) {
+    const cy = Math.round(oy + (rr + 0.5) * py);
+    if (cy < 0 || cy >= H) continue;
+    for (let cc = 0; cc < fine.width; cc++) {
+      const cx = Math.round(ox + (cc + 0.5) * px);
+      if (cx < 0 || cx >= W || !m.body[cy * W + cx]) continue;            // outside sprite
+      const i = Math.floor((cx - art.ox) / art.px);
+      const j = Math.floor((cy - art.oy) / art.py);
+      if (i < 0 || i >= art.cols || j < 0 || j >= art.rows) continue;
+      const col = art.cells[j * art.cols + i];
+      if (!col) continue;
+      const cell = rr * fine.width + cc, o = cell * 4;
+      fine.data[o] = col[0]; fine.data[o + 1] = col[1]; fine.data[o + 2] = col[2];
+      fine.coverage[cell] = 1; fine.litColors.push(col);
+    }
+  }
+  return fine;
 }
 
 /** Recover the logical bitmap: one output pixel per detected sub-cell. */
