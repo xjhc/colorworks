@@ -21,6 +21,7 @@ import {
   type RenderOptions,
 } from "./colorworks";
 import { renderDepixelate, type DepixelateOptions } from "./depixelate";
+import { renderRepixel, detectCandidates, toGlyphText, type RepixelOptions } from "./repixel";
 import { boxFit, conformIndexed, type FitMode } from "./output_size";
 
 // Fixed seed — mirrors the studio's seed=42 so blue-noise/flow/maze are stable.
@@ -52,7 +53,10 @@ const state = {
   sourceH: 0,
   setup: { maxW: 360 as number | null, maxH: null as number | null, fit: "fit" as FitMode },
   styleId: DEFAULT_STYLE_ID,
-  knobValues: {} as Record<string, ParamValue>, // persisted across styles
+  // Knob state bucketed by renderer so each mode keeps its own defaults (e.g.
+  // Repixel's palette:"original"); the six tone-dither styles share one renderer
+  // and thus keep carrying colors/contrast across each other.
+  knobValues: {} as Record<string, Record<string, ParamValue>>,
   render: null as RenderState | null,
   colorMap: {} as Record<string, string>, // originalHex -> replacementHex
   hoverIdx: null as number | null,
@@ -63,10 +67,17 @@ const state = {
   exportUrl: "",
   thumbUrl: "",
   offscreen: null as HTMLCanvasElement | null,
+  glyphText: "" as string, // braille+block text of the native repixel render (repixel only)
 };
 
 function styleById(id: string): StyleDef {
   return STYLES.find((s) => s.id === id) ?? STYLES[0];
+}
+
+/** The current style's knob bucket (created on first access), keyed by renderer. */
+function knobBucket(): Record<string, ParamValue> {
+  const renderer = styleById(state.styleId).renderer ?? "tone_dither";
+  return (state.knobValues[renderer] ??= {});
 }
 
 // ── toast ─────────────────────────────────────────────────────────────────────
@@ -195,7 +206,7 @@ function applyStyle(styleId: string): void {
 }
 
 function paramValue(p: ParamDef): ParamValue {
-  let v = state.knobValues[p.key];
+  let v = knobBucket()[p.key];
   if (v === undefined) v = p.default;
   if (p.options && p.options.length && !p.options.some((o) => String(o.value) === String(v))) {
     v = p.default;
@@ -207,6 +218,7 @@ function buildKnobs(): void {
   const wrap = $("#knobs");
   wrap.innerHTML = "";
   const style = styleById(state.styleId);
+  const bucket = knobBucket();
 
   styleParams(style).forEach((p) => {
     if (p.key in style.fixed) return; // controlled by the Style selector — hidden
@@ -216,7 +228,7 @@ function buildKnobs(): void {
     row.id = `knob-${p.key}`;
 
     const persist = (val: ParamValue) => {
-      state.knobValues[p.key] = val;
+      bucket[p.key] = val;
     };
 
     if (p.type === "bool") {
@@ -386,27 +398,55 @@ function renderFocus(): void {
     state.renderStart = performance.now();
     const style = styleById(state.styleId);
     const vals = gatherValues();
-    // Depixelate derives its own resolution from the full-res grid, so it must
-    // see the source at native size (not the output-downscaled raster).
-    const raster = rasterizeSource(style.renderer === "depixelate");
-    let res =
-      style.renderer === "depixelate"
-        ? renderDepixelate(raster, {
-            block: numParam(vals, "block", 2),
-            tau: numParam(vals, "tau", 45),
-            pitch: numParam(vals, "pitch", 0),
-            palette: vals.palette as DepixelateOptions["palette"],
-            colors: numParam(vals, "colors", 4),
-            inkColor: String(vals.ink_color ?? "#161616"),
-            paperColor: String(vals.paper_color ?? "#f4ebd9"),
-            keepMarks: vals.keep_marks === true,
-            fillMult: numParam(vals, "fill_mult", 1),
-          })
-        : renderToneDither(raster, toRenderOptions(vals));
-    // Depixelate detects + tiles on the native grid, so its raw output size is
-    // decoupled from the output-size control; scale it to the requested size so
-    // the preview and exported PNG honour it (other renderers already do).
+    let repixelInfo = ""; // candidate pixel-size readout (repixel only)
+    state.glyphText = ""; // reset; set below only for the repixel renderer
+    // Depixelate and Repixel derive their own resolution from the full-res grid,
+    // so they must see the source at native size (not the output-downscaled raster).
+    const gridRenderer = style.renderer === "depixelate" || style.renderer === "repixel";
+    const raster = rasterizeSource(gridRenderer);
+    let res: ReturnType<typeof renderToneDither>;
     if (style.renderer === "depixelate") {
+      res = renderDepixelate(raster, {
+        block: numParam(vals, "block", 2),
+        tau: numParam(vals, "tau", 45),
+        pitch: numParam(vals, "pitch", 0),
+        palette: vals.palette as DepixelateOptions["palette"],
+        colors: numParam(vals, "colors", 4),
+        inkColor: String(vals.ink_color ?? "#161616"),
+        paperColor: String(vals.paper_color ?? "#f4ebd9"),
+        keepMarks: vals.keep_marks === true,
+        fillMult: numParam(vals, "fill_mult", 1),
+      });
+    } else if (style.renderer === "repixel") {
+      res = renderRepixel(raster, {
+        target: vals.target as RepixelOptions["target"],
+        pitch: numParam(vals, "pitch", 0),
+        tau: numParam(vals, "tau", 45),
+        minLit: numParam(vals, "min_lit", 2),
+        shade: vals.shade !== false,
+        palette: vals.palette as RepixelOptions["palette"],
+        colors: numParam(vals, "colors", 6),
+        inkColor: String(vals.ink_color ?? "#161616"),
+        paperColor: String(vals.paper_color ?? "#f4ebd9"),
+        bgMode: vals.bg_mode as RepixelOptions["bgMode"],
+        bgColor: String(vals.bg_color ?? "#181818"),
+      });
+      // Capture the braille+block glyph text from the NATIVE grid (1px/cell),
+      // before conformIndexed upscales it (which would break the 2x4 grouping).
+      state.glyphText = toGlyphText(res);
+      // Candidate pixel sizes for the readout — the image may carry two scales.
+      const cand = detectCandidates(raster);
+      const star = (t: string) => (vals.target === t ? "●" : "○");
+      repixelInfo =
+        ` · ${star("fine")} fine ${cand.fine.toFixed(1)}px · ` +
+        `${star("subject")} subject ${cand.subject.toFixed(1)}px`;
+    } else {
+      res = renderToneDither(raster, toRenderOptions(vals));
+    }
+    // The grid renderers detect + tile on the native grid, so their raw output
+    // size is decoupled from the output-size control; scale to the requested size
+    // so the preview and exported PNG honour it (other renderers already do).
+    if (gridRenderer) {
       const { maxW, maxH, fit } = state.setup;
       res = conformIndexed(res, maxW && maxW > 0 ? maxW : null, maxH && maxH > 0 ? maxH : null, fit);
     }
@@ -421,9 +461,11 @@ function renderFocus(): void {
 
     const elapsed = Math.round(performance.now() - state.renderStart);
     const name = styleById(state.styleId).label.split(" — ")[0];
-    $("#bigCaption").innerHTML = `<b>${name}</b> · ${res.width} × ${res.height} px`;
+    // repixelInfo is built only from numbers + bullet glyphs (no user input).
+    $("#bigCaption").innerHTML = `<b>${name}</b> · ${res.width} × ${res.height} px${repixelInfo}`;
     $("#specDims").textContent = `${res.width} × ${res.height}`;
     $("#specRender").textContent = `${elapsed} ms`;
+    $("#copyGlyphs").hidden = style.renderer !== "repixel";
     $("#plateLoading").hidden = true;
 
     applyZoom();
@@ -651,6 +693,27 @@ function bindPan(): void {
   });
 }
 
+// ── glyph-text copy (braille + block re-encoding) ─────────────────────────────
+async function copyGlyphText(): Promise<void> {
+  const text = state.glyphText;
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("Glyph text copied to clipboard");
+    return;
+  } catch {
+    // Clipboard blocked (e.g. insecure context) — fall back to a .txt download.
+    const blob = new Blob([text], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${state.sourceName.replace(/\.[^.]+$/, "") || "image"}_glyphs.txt`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast("Clipboard unavailable — downloaded glyph text");
+  }
+}
+
 // ── init ──────────────────────────────────────────────────────────────────────
 function init(): void {
   buildStyleSelect();
@@ -665,6 +728,7 @@ function init(): void {
     buildSwatches();
     updateExport();
   });
+  $("#copyGlyphs").addEventListener("click", () => copyGlyphText());
   showStudio(false);
 
   let resizeRAF = 0;

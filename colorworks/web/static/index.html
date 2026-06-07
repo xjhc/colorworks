@@ -4,192 +4,145 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Colorworks</title>
-    <link rel="icon" href="data:,">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f3ead7'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%23e8482f' stroke-width='2'/%3E%3Cpath d='M16 2v28M2 16h28' stroke='%231a1714' stroke-width='1'/%3E%3C/svg%3E">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,900&family=Archivo:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/styles.css">
   </head>
   <body>
-    <main class="app-shell">
-      <aside class="rail rail-left">
-        <header class="brand" style="display: flex; flex-direction: column; align-items: stretch; gap: 8px;">
-          <div style="display: flex; align-items: baseline; justify-content: space-between;">
-            <h1>Colorworks</h1>
-          </div>
-          <button id="enterGalleryBtn" type="button" class="button" style="min-height: 28px; padding: 4px 8px; font-size: 12px; width: 100%; border: 1px solid var(--accent); background: var(--accent); color: var(--paper);">Comparison Gallery</button>
-        </header>
+    <div class="grain" aria-hidden="true"></div>
 
-        <section class="panel">
-          <h2>Asset</h2>
-          <label class="file-picker">
-            <input id="assetInput" type="file" accept="image/*">
-            <span>Choose raster</span>
-          </label>
-          <dl class="meta-list">
-            <div>
-              <dt>Name</dt>
-              <dd id="assetName">None</dd>
+    <!-- ── Top registration bar ───────────────────────────────────── -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="regmark" aria-hidden="true">&#8853;</span>
+        <h1>Colorworks</h1>
+      </div>
+      <div class="colorbar" aria-hidden="true">
+        <span style="--c:#1a1714"></span>
+        <span style="--c:#e8482f"></span>
+        <span style="--c:#f5b32a"></span>
+        <span style="--c:#2b3a8c"></span>
+        <span style="--c:#f3ead7"></span>
+      </div>
+      <div class="topbar-meta" id="topbarMeta">no source loaded</div>
+    </header>
+
+    <div class="layout">
+      <!-- ── LEFT: source + canvas ────────────────────────────────── -->
+      <aside class="rail rail-left" id="setup">
+        <section class="block">
+          <div class="block-head"><span class="num">01</span><h2>Source</h2></div>
+          <input id="fileInput" type="file" accept="image/*" hidden>
+          <button type="button" class="dropzone" id="dropzone">
+            <div class="dz-thumb" id="srcThumb" aria-hidden="true"></div>
+            <div class="dz-body">
+              <div class="dz-name" id="srcName">Drop a photo</div>
+              <div class="dz-meta" id="srcMeta">or click to browse</div>
             </div>
-            <div>
-              <dt>Size</dt>
-              <dd id="assetSize">-</dd>
-            </div>
-            <div>
-              <dt>Checksum</dt>
-              <dd id="assetChecksum">-</dd>
-            </div>
-          </dl>
+          </button>
         </section>
 
-        <section class="panel">
-          <h2>Presets</h2>
-          <select id="presetSelect" class="select" aria-label="Presets list">
-            <!-- Options dynamically populated -->
-          </select>
-          <div class="button-row" style="margin-bottom: 8px;">
-            <button id="loadPreset" type="button">Apply</button>
-            <button id="deletePreset" type="button" style="color: #e05638;">Delete</button>
+        <section class="block">
+          <div class="block-head"><span class="num">02</span><h2>Output size</h2></div>
+          <div class="field-row">
+            <label class="field">
+              <span>max W</span>
+              <input id="maxW" type="number" value="360" min="16" max="4096" inputmode="numeric">
+            </label>
+            <label class="field">
+              <span>max H</span>
+              <input id="maxH" type="number" placeholder="auto" min="16" max="4096" inputmode="numeric">
+            </label>
           </div>
-          <!-- Preset Metadata Display -->
-          <div id="presetMeta" style="font-size: 11px; color: var(--muted); margin-bottom: 8px; line-height: 1.4; display: none;">
-            <div id="presetMetaDesc" style="font-style: italic; margin-bottom: 4px;"></div>
-            <div id="presetMetaRec" style="margin-bottom: 2px;"></div>
-            <div id="presetMetaTags"></div>
+          <div class="seg" id="fitGroup" role="group" aria-label="Fit mode">
+            <button type="button" class="active" data-fit="fit">Fit</button>
+            <button type="button" data-fit="cover">Cover</button>
+            <button type="button" data-fit="stretch">Stretch</button>
           </div>
-          <div style="border-top: 1px solid var(--line); padding-top: 8px;">
-            <input id="newPresetName" class="text-input" placeholder="New Preset Name" aria-label="New preset name" style="margin-bottom: 4px;">
-            <button id="savePreset" type="button" class="button" style="width: 100%;">Save Preset</button>
-          </div>
-        </section>
-
-        <section class="panel">
-          <h2>Recipe</h2>
-          <input id="recipeName" class="text-input" value="Bayer proof" aria-label="Recipe name">
-          <div class="button-row">
-            <button id="saveRecipe" type="button">Save</button>
-            <button id="reloadRecipe" type="button">Load</button>
-          </div>
-          <select id="recipeSelect" class="select" aria-label="Saved recipes"></select>
+          <p class="field-note">Low sizes (~150–250px) give the chunky, pixelated dither look.</p>
         </section>
       </aside>
 
-      <section class="workspace">
-        <div class="viewer-toolbar">
-          <div class="inspector-tabs" style="display: flex; gap: 8px; align-items: center;">
-            <button type="button" class="tab-btn active" data-tab="source" style="min-height: 28px; padding: 4px 8px; font-size: 13px;">Source</button>
-            <button type="button" class="tab-btn" data-tab="tone_map" id="tabToneMap" style="min-height: 28px; padding: 4px 8px; font-size: 13px;">Tone Map</button>
-            <button type="button" class="tab-btn" data-tab="edge_mask" id="tabEdgeMask" style="min-height: 28px; padding: 4px 8px; font-size: 13px;">Edge Mask</button>
-            <button type="button" class="tab-btn" data-tab="orientation_field" id="tabOrientation" style="min-height: 28px; padding: 4px 8px; font-size: 13px; display: none;">Orientation</button>
-            <button type="button" class="tab-btn" data-tab="final" style="min-height: 28px; padding: 4px 8px; font-size: 13px;">Final</button>
+      <!-- ── CENTER: live preview ─────────────────────────────────── -->
+      <main class="stage" id="stage">
+        <section class="empty" id="emptyState">
+          <div class="empty-art" aria-hidden="true">
+            <span class="regmark big">&#8853;</span>
           </div>
-          <div id="vectorControls" style="display: none; align-items: center; gap: 4px; margin-left: 12px;">
-            <label for="vectorViewSelect" style="font-size: 12px; color: var(--muted); cursor: pointer;">View:</label>
-            <select id="vectorViewSelect" class="select" style="min-height: 24px; padding: 0 4px; font-size: 12px; margin: 0; width: auto;">
-              <option value="orientation_hsv" selected>HSV Angle</option>
-              <option value="glyph_field">Glyphs</option>
-            </select>
+          <h2>A photo, a few colors, a thousand dots.</h2>
+          <p>Drop a photo on the left. It opens straight in the studio — pick a
+             style, turn the knobs, watch it render live, recolour the palette,
+             and export.</p>
+        </section>
+
+        <section class="focus-view" id="editorView" hidden>
+          <div class="lightbox">
+            <figure class="plate" id="plate">
+              <span class="reg tl" aria-hidden="true">&#8853;</span>
+              <span class="reg tr" aria-hidden="true">&#8853;</span>
+              <span class="reg bl" aria-hidden="true">&#8853;</span>
+              <span class="reg br" aria-hidden="true">&#8853;</span>
+              <canvas id="bigCanvas"></canvas>
+              <div class="plate-loading" id="plateLoading" hidden><div class="spinner"></div></div>
+            </figure>
           </div>
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <span id="renderStatus">Idle</span>
-            <button id="cancelRenderBtn" type="button" class="button" style="display: none; min-height: 20px; padding: 2px 6px; font-size: 11px; margin: 0; line-height: 1; border-color: var(--muted); color: var(--muted);">Cancel</button>
+          <div class="plate-caption" id="bigCaption"></div>
+          <div class="zoom-bar" id="zoomBar">
+            <button type="button" id="zoomFit" class="zoom-btn active">Fit</button>
+            <button type="button" class="zoom-step" data-step="-1" aria-label="Zoom out">&minus;</button>
+            <input type="range" id="zoomSlider" min="25" max="400" step="5" value="100" aria-label="Zoom">
+            <button type="button" class="zoom-step" data-step="1" aria-label="Zoom in">+</button>
+            <span class="zoom-val" id="zoomVal">fit</span>
           </div>
+        </section>
+      </main>
+
+      <!-- ── RIGHT: studio controls ───────────────────────────────── -->
+      <aside class="rail rail-right" id="inspector">
+        <div class="inspector-empty" id="inspectorEmpty">
+          <span class="regmark" aria-hidden="true">&#9711;</span>
+          <p>Drop a photo to open the studio.</p>
         </div>
 
-        <div class="viewer-container" style="min-height: 0; display: grid; background: var(--line);">
-          <figure class="viewer" style="height: 100%;">
-            <img id="mainViewer" alt="Workspace view">
-            <div id="noArtifactMsg" style="display: none; padding: 20px; font-style: italic; color: var(--muted); background: var(--paper); border: 1px solid var(--line); border-radius: 4px;">Artifact not generated</div>
-          </figure>
-        </div>
-      </section>
-
-      <aside class="rail rail-right" style="overflow-y: auto;">
-        <section class="panel">
-          <h2>Pipeline</h2>
-          <label class="control">
-            <span>Select mode</span>
-            <select id="pipelineSelect" class="select">
-              <option value="ordered_bayer" selected>Phase 0: Bayer Dither</option>
-              <option value="tonal_analyzer">Phase 1A: Tonal Wave</option>
-              <option value="floyd_steinberg">Phase 1B: Floyd-Steinberg</option>
-              <option value="structure_analyzer">Phase 2: Structure Analyzer</option>
-              <option value="cvt_stippling">Phase 3: CVT Stippling</option>
-              <option value="dbs">Phase 4A: Direct Binary Search</option>
-              <option value="saed">Phase 4B: Structure-Aware Error Diffusion</option>
+        <div class="inspector-body" id="inspectorBody" hidden>
+          <section class="block">
+            <div class="block-head"><span class="num">03</span><h2>Style</h2></div>
+            <select id="styleSelect" class="style-select">
+              <option value="flow">Flow — flowing waves</option>
+              <option value="bayer">Ordered — Bayer grid</option>
+              <option value="blue_noise">Blue noise — grain</option>
+              <option value="floyd_steinberg">Floyd–Steinberg</option>
+              <option value="flat">Flat poster — no dither</option>
             </select>
-          </label>
-        </section>
+          </section>
+          <div class="knobs" id="knobs"></div>
 
-        <section class="panel">
-          <h2>Parameters</h2>
-          <div id="dynamicControls" style="display: flex; flex-direction: column; gap: 12px;">
-            <!-- Dynamically generated controls based on schema -->
-          </div>
-        </section>
-
-        <section class="panel" id="layersPanel">
-          <h2>Layers</h2>
-          <div style="margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--line);">
-            <label class="control" style="display: grid; grid-template-columns: 1fr auto; align-items: center;">
-              <span>Paper Color</span>
-              <input type="color" id="paperColorPicker" value="#f4ebd9" style="width: 40px; height: 24px; border: none; cursor: pointer; padding: 0;">
-            </label>
-          </div>
-          <div id="layersList" style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 12px;">
-            <!-- Rendered dynamically -->
-          </div>
-          <button id="addLayerBtn" type="button" class="button" style="width: 100%;">Add Ink Layer</button>
-        </section>
-
-        <section class="panel">
-          <h2>Export</h2>
-          <dl class="meta-list">
-            <div>
-              <dt>Render</dt>
-              <dd id="renderTime">-</dd>
+          <section class="palette-block" id="paletteBlock" hidden>
+            <div class="block-head">
+              <span class="num" id="paletteCount">—</span><h2>Palette</h2>
+              <button type="button" id="resetColors" class="reset-colors" hidden>reset</button>
             </div>
-            <div>
-              <dt>Output hash</dt>
-              <dd id="outputChecksum">-</dd>
-            </div>
-          </dl>
-          <div class="button-row" style="display: flex; gap: 8px;">
-            <a id="exportLink" class="button disabled" href="#" download style="flex: 1; text-align: center; display: inline-flex; align-items: center; justify-content: center; min-height: 32px;">Export PNG</a>
-            <button id="exportSvgBtn" type="button" class="button disabled" style="flex: 1; min-height: 32px;">Export SVG</button>
-          </div>
-        </section>
+            <div class="swatches" id="swatches"></div>
+            <p class="palette-hint">Hover to find a colour · click to recolour</p>
+            <input type="color" id="swatchPicker" hidden>
+          </section>
+
+          <section class="export">
+            <div class="block-head"><span class="num">↧</span><h2>Export</h2></div>
+            <dl class="spec">
+              <div><dt>dimensions</dt><dd id="specDims">—</dd></div>
+              <div><dt>render</dt><dd id="specRender">—</dd></div>
+              <div><dt>checksum</dt><dd id="specHash">—</dd></div>
+            </dl>
+            <a class="export-btn disabled" id="exportPng" download>Export PNG</a>
+          </section>
+        </div>
       </aside>
+    </div>
 
-      <!-- Gallery View (initially hidden) -->
-      <section id="galleryView" style="display: none; flex-direction: column; min-height: 100vh; padding: 24px; background: var(--panel); overflow-y: auto; gap: 20px;">
-        <header style="display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid var(--line); padding-bottom: 16px;">
-          <div style="display: flex; align-items: center; gap: 16px;">
-            <h1 style="margin: 0; font-size: 24px; font-weight: 760;">Comparison Gallery</h1>
-            <span style="color: var(--muted); font-size: 14px;">Real-Image Validation</span>
-          </div>
-          <div style="display: flex; gap: 12px; align-items: center;">
-            <label style="font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px;">
-              Fixture:
-              <select id="galleryFixtureFilter" class="select" style="min-height: 32px; width: auto; margin: 0; padding: 0 8px; font-size: 13px;">
-                <option value="all">All Fixtures</option>
-              </select>
-            </label>
-            <label style="font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px;">
-              Kind:
-              <select id="galleryKindFilter" class="select" style="min-height: 32px; width: auto; margin: 0; padding: 0 8px; font-size: 13px;">
-                <option value="all">All Kinds</option>
-                <option value="algorithm">Algorithms Only</option>
-                <option value="preset">Presets Only</option>
-              </select>
-            </label>
-            <button id="refreshGalleryBtn" type="button" class="button" style="min-height: 32px; font-size: 13px; padding: 0 12px; margin: 0;">Refresh</button>
-            <button id="exitGalleryBtn" type="button" class="button" style="min-height: 32px; font-size: 13px; padding: 0 12px; margin: 0; background: var(--accent); border-color: var(--accent);">Back to Workspace</button>
-          </div>
-        </header>
-
-        <div id="galleryContent" style="display: flex; flex-direction: column; gap: 28px;">
-          <!-- Content populated dynamically -->
-        </div>
-      </section>
-    </main>
+    <div class="toast" id="toast" hidden></div>
 
     <script src="/static/app.js"></script>
   </body>

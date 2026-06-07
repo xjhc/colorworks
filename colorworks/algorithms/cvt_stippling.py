@@ -43,7 +43,7 @@ _MAX_DIM = 256
 
 DEFINITION = AlgorithmDefinition(
     id="cvt_stippling",
-    version="1.0.0",
+    version="1.1.0",
     family=AlgorithmFamily.STIPPLING,
     role=AlgorithmRole.RENDERER,
     name="CVT Stippling",
@@ -60,13 +60,13 @@ DEFINITION = AlgorithmDefinition(
     parameters=[
         ParameterDef(
             "n_stipples", "Number of stipples", ParameterType.INT,
-            default=300, min=10, max=2000,
+            default=2500, min=200, max=16000, step=100,
             group="stippling",
             invalidates=["stipple_points", "final_raster"],
         ),
         ParameterDef(
             "dot_radius", "Dot radius (px)", ParameterType.FLOAT,
-            default=2.0, min=0.5, max=10.0, step=0.5,
+            default=1.1, min=0.5, max=10.0, step=0.1,
             group="stippling",
             invalidates=["final_raster"],
         ),
@@ -84,13 +84,13 @@ DEFINITION = AlgorithmDefinition(
         ),
         ParameterDef(
             "ink_color", "Ink colour", ParameterType.STR,
-            default="#1a1a1a",
+            default="#1a1a1a", ui_hint="color",
             group="appearance",
             invalidates=["final_raster"],
         ),
         ParameterDef(
             "paper_color", "Paper colour", ParameterType.STR,
-            default="#f4ebd9",
+            default="#f4ebd9", ui_hint="color",
             group="appearance",
             invalidates=["final_raster"],
         ),
@@ -351,6 +351,12 @@ class CVTStippling(IterativeAlgorithm):
             pts[:, 0] /= self._sx
             pts[:, 1] /= self._sy
             pts = np.clip(pts, [0, 0], [W - 1, H - 1])
+            # Points were relaxed at a downsampled working resolution; grow the
+            # dots by the same factor so coverage holds at full output size
+            # (otherwise large exports look sparse and blank).
+            upscale = 1.0 / max(min(self._sx, self._sy), 1e-6)
+            if upscale > 1.0:
+                radius *= upscale
         else:
             H, W = self._density_work.shape
             pts = np.clip(self._points, [0, 0], [W - 1, H - 1])

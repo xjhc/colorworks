@@ -1,0 +1,603 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Colorworks — Quick mode mockup</title>
+    <link rel="icon" href="data:,">
+    <style>
+      :root {
+        color-scheme: light;
+        --paper: #f4ebd9;
+        --ink: #121212;
+        --panel: #faf8f1;
+        --line: #c8c0b1;
+        --muted: #665f54;
+        --accent: #0f6f78;
+        --accent-strong: #084d56;
+        --focus: #d43f21;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; background: var(--paper); color: var(--ink); }
+      button, input, select { font: inherit; }
+
+      .app {
+        display: grid;
+        grid-template-rows: auto 1fr;
+        min-height: 100vh;
+      }
+
+      /* Header */
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 24px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--line);
+      }
+      .brand { display: flex; align-items: baseline; gap: 12px; }
+      .brand h1 { margin: 0; font-size: 22px; font-weight: 760; letter-spacing: -0.01em; }
+      .brand .tag { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+      .mode-switch { display: inline-flex; border: 1px solid var(--ink); border-radius: 6px; overflow: hidden; }
+      .mode-switch button {
+        background: var(--paper); color: var(--ink); border: 0; padding: 6px 14px;
+        font-size: 13px; cursor: pointer; min-height: 32px;
+      }
+      .mode-switch button.active { background: var(--ink); color: var(--paper); }
+
+      /* Body */
+      .body {
+        display: grid;
+        grid-template-columns: minmax(280px, 340px) 1fr;
+        min-height: 0;
+      }
+
+      /* Left controls column */
+      .controls {
+        padding: 20px;
+        background: var(--panel);
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        overflow-y: auto;
+      }
+
+      .source {
+        display: grid;
+        grid-template-columns: 64px 1fr;
+        gap: 10px;
+        align-items: center;
+        padding: 10px;
+        background: #fffdf7;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+      .source .thumb {
+        width: 64px; height: 64px;
+        border-radius: 4px;
+        background:
+          linear-gradient(135deg, #c2a78a 0%, #6b4f3b 60%, #2a1a10 100%);
+        position: relative;
+        overflow: hidden;
+        border: 1px solid var(--line);
+      }
+      .source .thumb::after {
+        /* tiny silhouette flourish so it reads as "a real photo" */
+        content: ""; position: absolute; inset: 0;
+        background: radial-gradient(circle at 40% 35%, rgba(255,236,200,0.5) 0 22%, transparent 23%),
+                    radial-gradient(circle at 60% 80%, rgba(0,0,0,0.35) 0 30%, transparent 31%);
+      }
+      .source .meta { font-size: 12px; line-height: 1.5; color: var(--muted); }
+      .source .meta .name { color: var(--ink); font-size: 13px; font-weight: 600; }
+      .source .replace {
+        font-size: 11px; color: var(--accent); text-decoration: underline; cursor: pointer;
+      }
+
+      .section {
+        display: flex; flex-direction: column; gap: 10px;
+      }
+      .section h2 {
+        margin: 0;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+      }
+      .row label { color: var(--muted); }
+      .row input[type="number"], .row select {
+        width: 96px; min-height: 32px;
+        border: 1px solid var(--line); border-radius: 6px;
+        background: #fffdf7; padding: 4px 8px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .seg {
+        display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
+        background: #fffdf7;
+      }
+      .seg button {
+        background: transparent; border: 0; padding: 5px 10px;
+        font-size: 12px; color: var(--ink); cursor: pointer;
+        border-right: 1px solid var(--line); min-height: 30px;
+      }
+      .seg button:last-child { border-right: 0; }
+      .seg button.active { background: var(--ink); color: var(--paper); }
+
+      .color-count {
+        display: grid;
+        grid-template-columns: repeat(7, 1fr);
+        gap: 4px;
+      }
+      .color-count button {
+        background: #fffdf7; border: 1px solid var(--line);
+        padding: 6px 0; font-size: 13px; cursor: pointer;
+        min-height: 32px; border-radius: 4px;
+        font-variant-numeric: tabular-nums;
+      }
+      .color-count button.active {
+        background: var(--ink); color: var(--paper); border-color: var(--ink);
+      }
+
+      .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+      .chips button {
+        background: #fffdf7; border: 1px solid var(--line);
+        padding: 4px 10px; border-radius: 999px; font-size: 12px;
+        cursor: pointer; min-height: 26px; color: var(--ink);
+      }
+      .chips button.active {
+        background: var(--accent); border-color: var(--accent); color: var(--paper);
+      }
+
+      .generate {
+        background: var(--ink); color: var(--paper);
+        border: 0; border-radius: 6px;
+        padding: 10px; font-size: 14px; font-weight: 600;
+        cursor: pointer; min-height: 40px;
+      }
+      .generate:hover { background: var(--accent-strong); }
+
+      .footnote { font-size: 11px; color: var(--muted); line-height: 1.5; }
+
+      /* Right candidate grid */
+      .gallery {
+        padding: 20px;
+        overflow-y: auto;
+        display: flex; flex-direction: column; gap: 16px;
+      }
+      .gallery-head {
+        display: flex; justify-content: space-between; align-items: baseline; gap: 16px;
+      }
+      .gallery-head h2 {
+        margin: 0; font-size: 16px; font-weight: 700;
+      }
+      .gallery-head .sub { color: var(--muted); font-size: 13px; }
+      .gallery-head .filter {
+        display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted);
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 14px;
+      }
+      @media (max-width: 1200px) { .grid { grid-template-columns: repeat(3, 1fr); } }
+      @media (max-width: 900px)  { .grid { grid-template-columns: repeat(2, 1fr); } }
+
+      .card {
+        display: flex; flex-direction: column;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow: hidden;
+        cursor: pointer;
+        transition: transform 0.08s ease, border-color 0.08s ease, box-shadow 0.08s ease;
+      }
+      .card:hover {
+        transform: translateY(-1px);
+        border-color: var(--ink);
+      }
+      .card.selected {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px var(--accent);
+      }
+      .card .preview {
+        aspect-ratio: 1 / 1;
+        background: var(--paper);
+        position: relative;
+        image-rendering: pixelated;
+      }
+      .card .label {
+        padding: 8px 10px;
+        border-top: 1px solid var(--line);
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 8px;
+      }
+      .card .name { font-size: 13px; font-weight: 600; }
+      .card .desc { font-size: 11px; color: var(--muted); }
+      .card .badge {
+        font-size: 10px; padding: 1px 6px; border-radius: 999px;
+        background: var(--paper); border: 1px solid var(--line); color: var(--muted);
+        text-transform: uppercase; letter-spacing: 0.05em;
+      }
+
+      /* SVG preview tiles below use inline patterns for each algorithm style.
+         These are pure decoration to suggest the kind of output. */
+
+      .actions {
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 12px 16px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        margin-top: 4px;
+      }
+      .actions .summary { font-size: 13px; color: var(--muted); }
+      .actions .summary strong { color: var(--ink); }
+      .actions .btns { display: flex; gap: 8px; }
+      .actions button {
+        background: var(--ink); color: var(--paper); border: 0; border-radius: 6px;
+        padding: 8px 14px; font-size: 13px; cursor: pointer; min-height: 34px;
+      }
+      .actions button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--ink); }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <h1>Colorworks</h1>
+          <span class="tag">Quick</span>
+        </div>
+        <div class="mode-switch" role="tablist" aria-label="UI mode">
+          <button type="button" class="active">Quick</button>
+          <button type="button">Studio</button>
+        </div>
+      </header>
+
+      <div class="body">
+        <!-- LEFT: controls -->
+        <aside class="controls">
+          <div class="source">
+            <div class="thumb" aria-hidden="true"></div>
+            <div>
+              <div class="meta">
+                <div class="name">portrait_01.jpg</div>
+                <div>2048 × 3072 · 1.4 MB</div>
+                <div class="replace">Replace image</div>
+              </div>
+            </div>
+          </div>
+
+          <section class="section">
+            <h2>Output size</h2>
+            <div class="row">
+              <label for="maxW">Max width</label>
+              <input id="maxW" type="number" value="200" min="16" max="4096">
+            </div>
+            <div class="row">
+              <label for="maxH">Max height</label>
+              <input id="maxH" type="number" placeholder="auto">
+            </div>
+            <div class="row">
+              <label>Fit</label>
+              <div class="seg" role="group">
+                <button type="button" class="active">Fit</button>
+                <button type="button">Cover</button>
+                <button type="button">Stretch</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="section">
+            <h2>Colors</h2>
+            <div class="color-count" role="radiogroup" aria-label="Color count">
+              <button type="button">2</button>
+              <button type="button">3</button>
+              <button type="button" class="active">4</button>
+              <button type="button">5</button>
+              <button type="button">6</button>
+              <button type="button">7</button>
+              <button type="button">8</button>
+            </div>
+            <div class="row">
+              <label for="palette">Palette</label>
+              <select id="palette">
+                <option>Adaptive (from image)</option>
+                <option>Grayscale</option>
+                <option>Ink + paper</option>
+                <option>Custom…</option>
+              </select>
+            </div>
+          </section>
+
+          <section class="section">
+            <h2>Style filter</h2>
+            <div class="chips">
+              <button type="button" class="active">All</button>
+              <button type="button">Dither</button>
+              <button type="button">Halftone</button>
+              <button type="button">Stipple</button>
+              <button type="button">Pattern</button>
+            </div>
+          </section>
+
+          <button class="generate" type="button">Generate variants</button>
+
+          <p class="footnote">
+            Quick mode runs every compatible algorithm at sensible defaults and
+            shows you the results side-by-side. Pick one and switch to
+            <strong>Studio</strong> to fine-tune.
+          </p>
+        </aside>
+
+        <!-- RIGHT: candidate gallery -->
+        <main class="gallery">
+          <div class="gallery-head">
+            <div>
+              <h2>8 variants for portrait_01.jpg</h2>
+              <div class="sub">200 × 300 px · 4 colors · adaptive palette</div>
+            </div>
+            <div class="filter">Sorted by · <strong style="color: var(--ink);">recommended</strong></div>
+          </div>
+
+          <div class="grid">
+            <!-- Each card uses an inline SVG pattern to suggest the algorithm output -->
+
+            <!-- 1. Floyd–Steinberg -->
+            <article class="card selected">
+              <div class="preview">
+                <svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMid slice" style="width:100%;height:100%;display:block;">
+                  <defs>
+                    <pattern id="fs" width="3" height="3" patternUnits="userSpaceOnUse">
+                      <rect width="3" height="3" fill="#f4ebd9"/>
+                      <circle cx="0.7" cy="0.7" r="0.5" fill="#121212"/>
+                      <circle cx="2.2" cy="2.1" r="0.4" fill="#7a3a2a"/>
+                    </pattern>
+                  </defs>
+                  <rect width="100" height="100" fill="url(#fs)"/>
+                  <ellipse cx="50" cy="42" rx="20" ry="24" fill="#f4ebd9" opacity="0.55"/>
+                  <ellipse cx="50" cy="70" rx="32" ry="20" fill="#121212" opacity="0.25"/>
+                </svg>
+              </div>
+              <div class="label">
+                <div>
+                  <div class="name">Floyd–Steinberg</div>
+                  <div class="desc">Classic error diffusion</div>
+                </div>
+                <span class="badge">Recommended</span>
+              </div>
+            </article>
+
+            <!-- 2. Ordered (Bayer) -->
+            <article class="card">
+              <div class="preview">
+                <svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMid slice" style="width:100%;height:100%;display:block;">
+                  <defs>
+                    <pattern id="bayer" width="4" height="4" patternUnits="userSpaceOnUse">
+                      <rect width="4" height="4" fill="#f4ebd9"/>
+                      <rect x="0" y="0" width="2" height="2" fill="#121212"/>
+                      <rect x="2" y="2" width="2" height="2" fill="#7a3a2a"/>
+                    </pattern>
+                  </defs>
+                  <rect width="100" height="100" fill="url(#bayer)"/>
+                  <ellipse cx="50" cy="42" rx="20" ry="24" fill="#f4ebd9" opacity="0.45"/>
+                </svg>
+              </div>
+              <div class="label">
+                <div>
+                  <div class="name">Ordered (Bayer)</div>
+                  <div class="desc">Crisp grid dither</div>
+                </div>
+                <span class="badge">Dither</span>
+              </div>
+            </article>
+
+            <!-- 3. Blue-noise -->
+            <article class="card">
+              <div class="preview">
+                <svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMid slice" style="width:100%;height:100%;display:block;">
+                  <rect width="100" height="100" fill="#f4ebd9"/>
+                  <g fill="#121212">
+                    <circle cx="12" cy="18" r="0.9"/><circle cx="28" cy="9" r="0.9"/>
+                    <circle cx="44" cy="22" r="0.9"/><circle cx="62" cy="13" r="0.9"/>
+                    <circle cx="78" cy="25" r="0.9"/><circle cx="92" cy="11" r="0.9"/>
+                    <circle cx="6" cy="34" r="0.9"/><circle cx="22" cy="42" r="0.9"/>
+                    <circle cx="38" cy="36" r="0.9"/><circle cx="54" cy="48" r="0.9"/>
+                    <circle cx="71" cy="40" r="0.9"/><circle cx="88" cy="52" r="0.9"/>
+                    <circle cx="14" cy="58" r="0.9"/><circle cx="32" cy="64" r="0.9"/>
+                    <circle cx="48" cy="72" r="0.9"/><circle cx="66" cy="60" r="0.9"/>
+                    <circle cx="82" cy="74" r="0.9"/><circle cx="96" cy="68" r="0.9"/>
+                    <circle cx="20" cy="86" r="0.9"/><circle cx="40" cy="92" r="0.9"/>
+                    <circle cx="58" cy="84" r="0.9"/><circle cx="76" cy="90" r="0.9"/>
+                  </g>
+                  <ellipse cx="50" cy="50" rx="26" ry="32" fill="#7a3a2a" opacity="0.25"/>
+                </svg>
+              </div>
+              <div class="label">
+                <div>
+                  <div class="name">Blue-noise</div>
+                  <div class="desc">Stochastic, no banding</div>
+                </div>
+                <span class="badge">Dither</span>
+              </div>
+            </article>
+
+            <!-- 4. CVT Stippling -->
+            <article class="card">
+              <div class="preview">
+                <svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMid slice" style="width:100%;height:100%;display:block;">
+                  <rect width="100" height="100" fill="#f4ebd9"/>
+                  <g fill="#121212">
+                    <circle cx="50" cy="40" r="1.2"/><circle cx="42" cy="36" r="1.0"/>
+                    <circle cx="58" cy="38" r="1.1"/><circle cx="46" cy="44" r="0.9"/>
+                    <circle cx="54" cy="46" r="1.1"/><circle cx="48" cy="50" r="1.0"/>
+                    <circle cx="40" cy="56" r="0.8"/><circle cx="60" cy="54" r="1.0"/>
+                    <circle cx="34" cy="64" r="0.7"/><circle cx="66" cy="62" r="0.8"/>
+                    <circle cx="30" cy="72" r="0.6"/><circle cx="70" cy="70" r="0.7"/>
+                    <circle cx="50" cy="58" r="1.2"/>
+                    <circle cx="18" cy="80" r="0.5"/><circle cx="82" cy="82" r="0.5"/>
+                    <circle cx="22" cy="22" r="0.5"/><circle cx="80" cy="20" r="0.5"/>
+                  </g>
+                </svg>
+              </div>
+              <div class="label">
+                <div>
+                  <div class="name">CVT Stippling</div>
+                  <div class="desc">Hand-drawn dot density</div>
+                </div>
+                <span class="badge">Stipple</span>
+              </div>
+            </article>
+
+            <!-- 5. SAED -->
+            <article class="card">
+              <div class="preview">
+                <svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMid slice" style="width:100%;height:100%;display:block;">
+                  <defs>
+                    <pattern id="saed" width="6" height="6" patternUnits="userSpaceOnUse">
+                      <rect width="6" height="6" fill="#f4ebd9"/>
+                      <path d="M 0 6 L 6 0" stroke="#121212" stroke-width="0.7"/>
+                    </pattern>
+                  </defs>
+                  <rect width="100" height="100" fill="url(#saed)"/>
+                  <ellipse cx="50" cy="45" rx="24" ry="30" fill="#f4ebd9" opacity="0.65"/>
+                  <ellipse cx="50" cy="72" rx="32" ry="14" fill="#121212" opacity="0.18"/>
+                </svg>
+              </div>
+              <div class="label">
+                <div>
+                  <div class="name">SAED</div>
+                  <div class="desc">Follows image structure</div>
+                </div>
+                <span class="badge">Dither</span>
+              </div>
+            </article>
+
+            <!-- 6. DBS -->
+            <article class="card">
+              <div class="preview">
+                <svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMid slice" style="width:100%;height:100%;display:block;">
+                  <rect width="100" height="100" fill="#f4ebd9"/>
+                  <g fill="#121212">
+                    <rect x="8" y="10" width="2" height="2"/><rect x="14" y="14" width="2" height="2"/>
+                    <rect x="22" y="8" width="2" height="2"/><rect x="32" y="16" width="2" height="2"/>
+                    <rect x="44" y="10" width="2" height="2"/><rect x="56" y="14" width="2" height="2"/>
+                    <rect x="68" y="8" width="2" height="2"/><rect x="80" y="14" width="2" height="2"/>
+                    <rect x="10" y="28" width="2" height="2"/><rect x="20" y="32" width="2" height="2"/>
+                    <rect x="32" y="28" width="2" height="2"/><rect x="48" y="36" width="2" height="2"/>
+                    <rect x="60" y="30" width="2" height="2"/><rect x="74" y="34" width="2" height="2"/>
+                    <rect x="86" y="28" width="2" height="2"/>
+                    <rect x="14" y="48" width="2" height="2"/><rect x="28" y="52" width="2" height="2"/>
+                    <rect x="42" y="46" width="2" height="2"/><rect x="58" y="50" width="2" height="2"/>
+                    <rect x="72" y="48" width="2" height="2"/><rect x="84" y="52" width="2" height="2"/>
+                    <rect x="20" y="68" width="2" height="2"/><rect x="36" y="72" width="2" height="2"/>
+                    <rect x="50" y="68" width="2" height="2"/><rect x="64" y="72" width="2" height="2"/>
+                    <rect x="78" y="68" width="2" height="2"/>
+                    <rect x="24" y="86" width="2" height="2"/><rect x="44" y="88" width="2" height="2"/>
+                    <rect x="64" y="86" width="2" height="2"/>
+                  </g>
+                  <ellipse cx="50" cy="50" rx="22" ry="28" fill="#7a3a2a" opacity="0.2"/>
+                </svg>
+              </div>
+              <div class="label">
+                <div>
+                  <div class="name">DBS</div>
+                  <div class="desc">Best quality, slowest</div>
+                </div>
+                <span class="badge">Dither</span>
+              </div>
+            </article>
+
+            <!-- 7. Wave halftone -->
+            <article class="card">
+              <div class="preview">
+                <svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMid slice" style="width:100%;height:100%;display:block;">
+                  <rect width="100" height="100" fill="#f4ebd9"/>
+                  <g stroke="#121212" stroke-width="0.6" fill="none">
+                    <path d="M 0 10 Q 25 6 50 10 T 100 10"/>
+                    <path d="M 0 22 Q 25 18 50 22 T 100 22"/>
+                    <path d="M 0 34 Q 25 30 50 34 T 100 34"/>
+                    <path d="M 0 46 Q 25 42 50 46 T 100 46"/>
+                    <path d="M 0 58 Q 25 54 50 58 T 100 58"/>
+                    <path d="M 0 70 Q 25 66 50 70 T 100 70"/>
+                    <path d="M 0 82 Q 25 78 50 82 T 100 82"/>
+                    <path d="M 0 94 Q 25 90 50 94 T 100 94"/>
+                  </g>
+                  <ellipse cx="50" cy="48" rx="24" ry="30" fill="#f4ebd9" opacity="0.55"/>
+                </svg>
+              </div>
+              <div class="label">
+                <div>
+                  <div class="name">Wave halftone</div>
+                  <div class="desc">Tonal Wave preset</div>
+                </div>
+                <span class="badge">Halftone</span>
+              </div>
+            </article>
+
+            <!-- 8. Pang halftone -->
+            <article class="card">
+              <div class="preview">
+                <svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMid slice" style="width:100%;height:100%;display:block;">
+                  <rect width="100" height="100" fill="#f4ebd9"/>
+                  <g fill="#121212">
+                    <circle cx="10" cy="12" r="2.2"/><circle cx="24" cy="12" r="1.6"/>
+                    <circle cx="38" cy="12" r="2.4"/><circle cx="52" cy="12" r="1.4"/>
+                    <circle cx="66" cy="12" r="2.0"/><circle cx="80" cy="12" r="1.6"/>
+                    <circle cx="94" cy="12" r="2.2"/>
+                    <circle cx="10" cy="30" r="1.6"/><circle cx="24" cy="30" r="2.4"/>
+                    <circle cx="38" cy="30" r="1.4"/><circle cx="52" cy="30" r="2.6"/>
+                    <circle cx="66" cy="30" r="1.6"/><circle cx="80" cy="30" r="2.2"/>
+                    <circle cx="94" cy="30" r="1.4"/>
+                    <circle cx="10" cy="48" r="2.4"/><circle cx="24" cy="48" r="1.4"/>
+                    <circle cx="38" cy="48" r="2.6"/><circle cx="52" cy="48" r="1.4"/>
+                    <circle cx="66" cy="48" r="2.4"/><circle cx="80" cy="48" r="1.6"/>
+                    <circle cx="94" cy="48" r="2.0"/>
+                    <circle cx="10" cy="66" r="1.4"/><circle cx="24" cy="66" r="2.2"/>
+                    <circle cx="38" cy="66" r="1.6"/><circle cx="52" cy="66" r="2.4"/>
+                    <circle cx="66" cy="66" r="1.4"/><circle cx="80" cy="66" r="2.0"/>
+                    <circle cx="94" cy="66" r="1.6"/>
+                    <circle cx="10" cy="84" r="2.0"/><circle cx="24" cy="84" r="1.4"/>
+                    <circle cx="38" cy="84" r="2.2"/><circle cx="52" cy="84" r="1.6"/>
+                    <circle cx="66" cy="84" r="2.4"/><circle cx="80" cy="84" r="1.4"/>
+                    <circle cx="94" cy="84" r="2.2"/>
+                  </g>
+                </svg>
+              </div>
+              <div class="label">
+                <div>
+                  <div class="name">Pang halftone</div>
+                  <div class="desc">Newsprint-style dots</div>
+                </div>
+                <span class="badge">Halftone</span>
+              </div>
+            </article>
+          </div>
+
+          <div class="actions">
+            <div class="summary">
+              Selected: <strong>Floyd–Steinberg</strong> · 200 × 300 px · 4 colors
+            </div>
+            <div class="btns">
+              <button class="ghost" type="button">Refine in Studio</button>
+              <button type="button">Export PNG</button>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

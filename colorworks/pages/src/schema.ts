@@ -291,7 +291,132 @@ export const DEPIXELATE_PARAMS: ParamDef[] = [
   },
 ];
 
-export type RendererId = "tone_dither" | "depixelate";
+/** Repixel params (mirror of repixel.ts RepixelOptions). */
+export const REPIXEL_PARAMS: ParamDef[] = [
+  {
+    key: "target",
+    label: "Pixel target",
+    type: "str",
+    // Which scale to lock onto. The image can carry two: a fine glyph/braille
+    // lattice (background) and a coarser colour sprite (foreground). There is no
+    // single "real" pixel size — pick the one this render is for.
+    default: "fine",
+    group: "pattern",
+    options: [
+      { value: "fine", label: "Fine glyph field (background)" },
+      { value: "subject", label: "Color subject pitch (sprite)" },
+      { value: "manual", label: "Manual pitch" },
+    ],
+  },
+  {
+    key: "pitch",
+    label: "Grid pitch (px)",
+    type: "int",
+    default: 0,
+    min: 0,
+    max: 40,
+    step: 1,
+    group: "pattern",
+    visibleWhen: { param: "target", equals: ["manual"] },
+  },
+  {
+    key: "tau",
+    label: "Foreground threshold",
+    type: "int",
+    default: 45,
+    min: 0,
+    max: 255,
+    step: 1,
+    group: "pattern",
+  },
+  {
+    key: "min_lit",
+    label: "Min lit pixels",
+    type: "int",
+    default: 2,
+    min: 1,
+    max: 8,
+    step: 1,
+    group: "pattern",
+  },
+  {
+    key: "shade",
+    label: "Shade dots (halftone)",
+    type: "bool",
+    // ON: each cell is the area-average of its pixels, so size-modulated halftone
+    // dots (e.g. a dotted sphere) recover as a smooth tonal gradient and solid
+    // sprites stay full-colour. OFF: flat two-tone (crisp ink vs background).
+    default: true,
+    group: "pattern",
+  },
+  {
+    key: "palette",
+    label: "Palette",
+    type: "str",
+    // "Original colors" is the faithful default — with shading on, the recovered
+    // tones are meaningful gradient, not noise. "Adaptive" snaps to a small ink
+    // palette for a cleaner / poster look.
+    default: "original",
+    group: "palette",
+    options: [
+      { value: "original", label: "Original colors" },
+      { value: "adaptive", label: "Adaptive (from image)" },
+      { value: "grayscale", label: "Grayscale" },
+      { value: "duotone", label: "Duotone (ink → paper)" },
+    ],
+  },
+  {
+    key: "colors",
+    label: "Colors",
+    type: "int",
+    default: 6,
+    min: 2,
+    max: 12,
+    step: 1,
+    group: "palette",
+    visibleWhen: { param: "palette", equals: ["adaptive", "grayscale", "duotone"] },
+  },
+  {
+    key: "ink_color",
+    label: "Ink Color (duotone)",
+    type: "str",
+    default: "#161616",
+    group: "palette",
+    uiHint: "color",
+    visibleWhen: { param: "palette", equals: ["duotone"] },
+  },
+  {
+    key: "paper_color",
+    label: "Paper Color (duotone)",
+    type: "str",
+    default: "#f4ebd9",
+    group: "palette",
+    uiHint: "color",
+    visibleWhen: { param: "palette", equals: ["duotone"] },
+  },
+  {
+    key: "bg_mode",
+    label: "Background",
+    type: "str",
+    default: "auto",
+    group: "pattern",
+    options: [
+      { value: "auto", label: "Auto-detect" },
+      { value: "custom", label: "Custom color" },
+    ],
+  },
+  {
+    key: "bg_color",
+    label: "Background color",
+    type: "str",
+    default: "#181818",
+    group: "pattern",
+    uiHint: "color",
+    visibleWhen: { param: "bg_mode", equals: ["custom"] },
+  },
+];
+
+export type RendererId = "tone_dither" | "depixelate" | "repixel";
 
 export interface StyleDef {
   id: string;
@@ -321,6 +446,14 @@ export const STYLES: StyleDef[] = [
     params: DEPIXELATE_PARAMS,
     fixed: {},
   },
+  {
+    id: "repixel",
+    label: "Glyph art — braille + blocks",
+    description: "Recover pixel-art from terminal screenshots drawn with braille + block characters; each glyph cell becomes one true pixel",
+    renderer: "repixel",
+    params: REPIXEL_PARAMS,
+    fixed: {},
+  },
 ];
 
 export const DEFAULT_STYLE_ID = "flow";
@@ -332,7 +465,7 @@ export function styleParams(style: StyleDef): ParamDef[] {
 
 /** Convenience: the param defs keyed for lookup. */
 export const PARAM_BY_KEY: Record<string, ParamDef> = Object.fromEntries(
-  [...TONE_DITHER_PARAMS, ...DEPIXELATE_PARAMS].map((p) => [p.key, p]),
+  [...TONE_DITHER_PARAMS, ...DEPIXELATE_PARAMS, ...REPIXEL_PARAMS].map((p) => [p.key, p]),
 );
 
 export type { DitherMethod, PaletteMode };
