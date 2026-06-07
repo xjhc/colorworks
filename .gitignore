@@ -7,3 +7,4 @@ __pycache__/
 colorworks_data/
 .playwright-cli/
 .playwright-mcp/
+node_modules/

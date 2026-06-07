@@ -1,11 +1,107 @@
 from __future__ import annotations
 
+import hashlib
 import re
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 import numpy as np
 from PIL import Image, ImageOps
 
 HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3}$|^#[0-9a-fA-F]{6}$")
+
+
+FitMode = Literal["fit", "cover", "stretch"]
+
+
+@dataclass(frozen=True)
+class ResizeSpec:
+    max_width: int | None = None
+    max_height: int | None = None
+    fit: FitMode = "fit"
+
+    def is_noop(self) -> bool:
+        return self.max_width is None and self.max_height is None
+
+    def cache_token(self) -> str:
+        if self.is_noop():
+            return ""
+        return f"w={self.max_width or '-'},h={self.max_height or '-'},fit={self.fit}"
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any] | None) -> "ResizeSpec":
+        if not data:
+            return cls()
+        mw = data.get("max_width")
+        mh = data.get("max_height")
+        fit = data.get("fit", "fit")
+        if fit not in ("fit", "cover", "stretch"):
+            raise ValueError(f"invalid fit mode: {fit}")
+        return cls(
+            max_width=int(mw) if mw not in (None, "", 0) else None,
+            max_height=int(mh) if mh not in (None, "", 0) else None,
+            fit=fit,
+        )
+
+
+def resize_for_output(image: Image.Image, spec: ResizeSpec) -> Image.Image:
+    """Resize a PIL image to fit the given output spec. No-op if spec is empty.
+
+    fit: scale down to fit inside the box, preserve aspect, never upscale.
+    cover: scale so the image covers the box, preserve aspect, then center-crop.
+    stretch: resize to exactly the target dimensions, ignoring aspect.
+    """
+    if spec.is_noop():
+        return image
+
+    src_w, src_h = image.size
+    mw = spec.max_width
+    mh = spec.max_height
+
+    if spec.fit == "stretch":
+        target_w = mw if mw is not None else src_w
+        target_h = mh if mh is not None else src_h
+        if (target_w, target_h) == (src_w, src_h):
+            return image
+        return image.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+    # fit and cover share aspect-preserving scaling math
+    if mw is not None and mh is not None:
+        scale_w = mw / src_w
+        scale_h = mh / src_h
+        scale = min(scale_w, scale_h) if spec.fit == "fit" else max(scale_w, scale_h)
+    elif mw is not None:
+        scale = mw / src_w
+    else:
+        scale = mh / src_h
+
+    # never upscale in fit mode
+    if spec.fit == "fit" and scale >= 1.0:
+        return image
+
+    new_w = max(1, round(src_w * scale))
+    new_h = max(1, round(src_h * scale))
+    resized = image.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+    if spec.fit == "cover" and mw is not None and mh is not None:
+        # center-crop to exact box
+        left = max(0, (new_w - mw) // 2)
+        top = max(0, (new_h - mh) // 2)
+        resized = resized.crop((left, top, left + mw, top + mh))
+
+    return resized
+
+
+def derive_asset_checksum(base_checksum: str, spec: ResizeSpec) -> str:
+    """Return an effective asset checksum that captures the output spec.
+
+    Used so the render cache keys treat the same source image at different
+    output sizes as distinct inputs. When spec is a no-op, returns the base
+    checksum unchanged for backwards compatibility with existing caches.
+    """
+    if spec.is_noop():
+        return base_checksum
+    payload = f"{base_checksum}:{spec.cache_token()}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def validate_color(hex_str: str) -> None:

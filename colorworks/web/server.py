@@ -44,6 +44,7 @@ from colorworks.domain import (
     StrokeSet,
 )
 from colorworks.algorithms import registry, MediaAsset, RenderContext
+from colorworks.algorithms.image_ops import ResizeSpec, derive_asset_checksum, resize_for_output
 from colorworks.compositor import Compositor
 # Import to populate registry
 import colorworks.algorithms.tonal_analyzer
@@ -54,6 +55,10 @@ import colorworks.algorithms.cvt_stippling
 import colorworks.algorithms.pang_halftoning
 import colorworks.algorithms.dbs
 import colorworks.algorithms.saed
+import colorworks.algorithms.palette_quantize
+import colorworks.algorithms.ordered_bayer
+import colorworks.algorithms.tone_dither
+import colorworks.algorithms.depixelate
 
 STATIC_DIR = Path(__file__).with_name("static")
 
@@ -304,6 +309,9 @@ class ColorworksHandler(BaseHTTPRequestHandler):
             if route == "/api/render_runs":
                 self._handle_render_run_submit()
                 return
+            if route == "/api/candidates":
+                self._handle_candidates()
+                return
 
             if self.path == "/api/assets":
                 self._handle_asset_upload()
@@ -386,6 +394,18 @@ class ColorworksHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
 
+    def _load_source_image(self, record: Any, payload: dict[str, Any]) -> tuple[Image.Image, str, ResizeSpec]:
+        """Load the source PIL image and apply any output-size resize from the payload.
+
+        Returns (image, effective_checksum, spec). effective_checksum matches
+        record.checksum exactly when spec is a no-op so existing caches stay valid.
+        """
+        spec = ResizeSpec.from_json(payload.get("output"))
+        with Image.open(record.path) as img:
+            loaded = img.copy()
+        loaded = resize_for_output(loaded, spec)
+        return loaded, derive_asset_checksum(record.checksum, spec), spec
+
     def _build_run_context(self, payload: dict[str, Any]) -> tuple[Any, Any]:
         """Build (algo, ctx) for an iterative run. Does NOT run analysis."""
         asset_id = str(payload["asset_id"])
@@ -407,10 +427,9 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                 val = str(val)
             params[pd.key] = val
 
-        substrate = RasterGrid(record.width, record.height)
-        with Image.open(record.path) as img:
-            img_loaded = img.copy()
-        asset = MediaAsset(id=record.id, checksum=record.checksum,
+        img_loaded, effective_checksum, _ = self._load_source_image(record, payload)
+        substrate = RasterGrid(img_loaded.width, img_loaded.height)
+        asset = MediaAsset(id=record.id, checksum=effective_checksum,
                            image=img_loaded, substrate=substrate)
 
         comp_dict = payload.get("composition")
@@ -508,6 +527,111 @@ class ColorworksHandler(BaseHTTPRequestHandler):
 
         self.server.scheduler.submit_preview(run, algo, ctx, session_id)
         self._send_json(run.to_dict(), HTTPStatus.ACCEPTED)
+
+    def _build_candidate_context(
+        self, asset_id: str, algorithm_id: str, params: dict, output_payload: dict
+    ) -> tuple[Any, Any]:
+        record = self.server.store.get_asset(asset_id)
+        algo = registry.get(algorithm_id)
+
+        params_dict = {}
+        for pd in algo.definition.parameters:
+            val = params.get(pd.key, pd.default)
+            if pd.type == ParameterType.FLOAT:
+                val = float(val)
+            elif pd.type == ParameterType.INT:
+                val = int(val)
+            elif pd.type == ParameterType.BOOL:
+                val = bool(val)
+            elif pd.type == ParameterType.STR:
+                val = str(val)
+            params_dict[pd.key] = val
+
+        img_loaded, effective_checksum, _ = self._load_source_image(record, {"output": output_payload})
+        substrate = RasterGrid(img_loaded.width, img_loaded.height)
+        asset = MediaAsset(id=record.id, checksum=effective_checksum,
+                           image=img_loaded, substrate=substrate)
+
+        ctx = RenderContext(
+            input=asset,
+            params=params_dict,
+            composition=None,
+            seed=42,
+            quality="preview",
+            store=ArtifactStore(output_dir=self.server.store.artifacts_dir),
+            calibration=self.server.calibration_accessor,
+        )
+        return algo, ctx
+
+    def _handle_candidates(self) -> None:
+        payload = self._read_json()
+        asset_id = str(payload["asset_id"])
+        output_payload = payload.get("output", {})
+        colors_payload = payload.get("colors", {})
+        colors_count = int(colors_payload.get("count", 4))
+        palette_source = str(colors_payload.get("palette", "adaptive"))
+        style_filter = payload.get("style_filter")
+
+        from colorworks.algorithms.quick_mode import select_candidates
+        selected = select_candidates(colors_count, palette_source, style_filter)
+
+        candidate_set_id = f"cs_{uuid.uuid4().hex[:12]}"
+        candidates_list = []
+
+        for i, cand in enumerate(selected):
+            cand_id = f"cand_{i+1:02d}"
+            algo_id = cand["algorithm"]
+
+            try:
+                algo, ctx = self._build_candidate_context(asset_id, algo_id, cand["params"], output_payload)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                continue
+
+            # Skip algorithms whose input-size cap is smaller than the (post-resize) image.
+            # Better to drop them from the gallery than ship a guaranteed "Failed" card.
+            max_res = getattr(algo.definition.input_spec, "max_resolution", None)
+            if max_res is not None:
+                w, h = ctx.input.image.width, ctx.input.image.height
+                if w > max_res or h > max_res:
+                    continue
+
+            cal_checksum, cal_version = self._resolve_calibration_snapshot(algo)
+            cand_session_id = f"cand_sess_{uuid.uuid4().hex[:12]}"
+            preview_run_id = f"prev_{uuid.uuid4().hex[:12]}"
+
+            run = PreviewRun(
+                id=preview_run_id,
+                session_id=cand_session_id,
+                asset_id=ctx.input.id,
+                algorithm_id=algo.definition.id,
+                algorithm_version=algo.definition.version,
+                params=ctx.params,
+                composition=ctx.composition,
+                seed=ctx.seed,
+                quality=ctx.quality,
+                calibration_checksum=cal_checksum,
+                calibration_version=cal_version,
+            )
+
+            self.server.scheduler.submit_preview(run, algo, ctx, cand_session_id)
+
+            candidates_list.append({
+                "id": cand_id,
+                "algorithm": algo_id,
+                "label": cand["label"],
+                "description": cand["description"],
+                "style_tag": cand["style_tag"],
+                "params": cand["params"],
+                "preview_run_id": preview_run_id,
+                "thumb_url": None  # Construct on client side after completion
+            })
+
+        self._send_json({
+            "candidate_set_id": candidate_set_id,
+            "candidates": candidates_list
+        }, HTTPStatus.ACCEPTED)
 
     def _handle_render_run_submit(self) -> None:
         payload = self._read_json()
@@ -615,8 +739,8 @@ class ColorworksHandler(BaseHTTPRequestHandler):
             if not isinstance(params_payload, dict):
                 raise ValueError("params must be an object")
             params = BayerParams.from_json(params_payload)
-            with Image.open(record.path) as image:
-                rendered = ordered_dither(image, params)
+            image, _, _ = self._load_source_image(record, payload)
+            rendered = ordered_dither(image, params)
             buffer = io.BytesIO()
             rendered.save(buffer, format="PNG", optimize=False)
             png_bytes = buffer.getvalue()
@@ -652,12 +776,11 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                     "synchronously. Use POST /api/preview_runs or POST /api/render_runs."
                 )
 
-            with Image.open(record.path) as img:
-                width, height = img.size
-            algo.definition.input_spec.validate_image_size(renderer_id, width, height)
-
-            # 1. Use the shared pipeline execution helper
+            # 1. Use the shared pipeline execution helper (loads + resizes the image)
             ctx, comp_obj, algo, enabled_artifacts = self._execute_pipeline(payload)
+            algo.definition.input_spec.validate_image_size(
+                renderer_id, ctx.input.image.width, ctx.input.image.height
+            )
 
             if algo.definition.role == AlgorithmRole.RENDERER:
                 # Renderer direct execution path (bypasses compositor)
@@ -667,7 +790,7 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                     algo_id=algo.definition.id,
                     algo_version=algo.definition.version,
                     artifact_name="final_raster",
-                    asset_checksum=record.checksum,
+                    asset_checksum=ctx.input.checksum,
                     params=ctx.params,
                     parameters_def=algo.definition.parameters,
                     calibration_assets_checksum=cal_assets_checksum,
@@ -710,13 +833,18 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                     self.server.store.save_output(final_bytes)
                     elapsed_ms = (time.perf_counter() - started) * 1000.0
 
+                # Report the ACTUAL rendered dimensions (the image may have been
+                # resized by the output spec) rather than the source asset size.
+                with Image.open(io.BytesIO(final_bytes)) as _fim:
+                    final_w, final_h = _fim.size
+
                 self._send_json(
                     {
                         "output": {
                             "checksum": final_checksum,
                             "url": f"/api/outputs/{final_checksum}.png",
-                            "width": record.width,
-                            "height": record.height,
+                            "width": final_w,
+                            "height": final_h,
                             "render_ms": round(elapsed_ms, 2),
                         },
                         "artifacts": {
@@ -880,11 +1008,10 @@ class ColorworksHandler(BaseHTTPRequestHandler):
                 val = str(val)
             params[param_def.key] = val
 
-        # Load the source asset image
-        substrate = RasterGrid(record.width, record.height)
-        with Image.open(record.path) as img:
-            img_loaded = img.copy()
-        asset = MediaAsset(id=record.id, checksum=record.checksum, image=img_loaded, substrate=substrate)
+        # Load the source asset image (with any requested output-size resize applied)
+        img_loaded, effective_checksum, _ = self._load_source_image(record, payload)
+        substrate = RasterGrid(img_loaded.width, img_loaded.height)
+        asset = MediaAsset(id=record.id, checksum=effective_checksum, image=img_loaded, substrate=substrate)
 
         # Setup active run ArtifactStore
         active_store = ArtifactStore(output_dir=None)
@@ -908,14 +1035,15 @@ class ColorworksHandler(BaseHTTPRequestHandler):
 
         cal_assets_checksum, _ = self._resolve_calibration_snapshot(algo)
 
-        # Compute cache keys for the intermediate artifacts dynamically
+        # Compute cache keys for the intermediate artifacts dynamically.
+        # Use the effective (post-resize) checksum so different output sizes don't collide.
         analyze_cache_keys = {}
         for name in enabled_artifacts:
             key = self.server.store.get_artifact_cache_key(
                 algo_id=algo.definition.id,
                 algo_version=algo.definition.version,
                 artifact_name=name,
-                asset_checksum=record.checksum,
+                asset_checksum=effective_checksum,
                 params=params,
                 parameters_def=algo.definition.parameters,
                 calibration_assets_checksum=cal_assets_checksum,
@@ -1081,10 +1209,12 @@ class ColorworksHandler(BaseHTTPRequestHandler):
             self._send_error(HTTPStatus.BAD_REQUEST, "Composition has no hatch/crosshatch stroke layers for SVG export")
             return
 
+        # Use post-resize dimensions so the SVG matches what the user previewed.
+        out_w, out_h = ctx.input.image.width, ctx.input.image.height
         compositor = Compositor(ctx.store)
-        stroke_sets = compositor.build_stroke_set(comp_obj, record.width, record.height, ctx.seed)
+        stroke_sets = compositor.build_stroke_set(comp_obj, out_w, out_h, ctx.seed)
 
-        svg_str = self._serialize_to_svg(comp_obj, stroke_sets, record.width, record.height)
+        svg_str = self._serialize_to_svg(comp_obj, stroke_sets, out_w, out_h)
 
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "image/svg+xml")
@@ -1229,7 +1359,12 @@ class ColorworksServer(ThreadingHTTPServer):
                 store.save_calibration_asset(checksum, data, metadata)
 
     def server_close(self) -> None:
-        self.scheduler.shutdown()
+        # server_close() may be called from socketserver's cleanup path before
+        # __init__ finishes (e.g. when bind fails), so the scheduler attr may
+        # not exist yet. Guard against that so the real bind error surfaces.
+        sched = getattr(self, "scheduler", None)
+        if sched is not None:
+            sched.shutdown()
         super().server_close()
 
 

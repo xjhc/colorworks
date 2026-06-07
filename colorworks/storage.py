@@ -10,10 +10,19 @@ from pathlib import Path
 from typing import Any
 import numpy as np
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from colorworks.recipe import Recipe, load_recipe, save_recipe
 from colorworks.domain import ParameterDef
+
+# Teach Pillow to read HEIC/HEIF (iPhone photos). Optional: if pillow-heif is
+# not installed the server still runs and HEIC uploads are rejected as before.
+try:
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+except ImportError:
+    pass
 
 
 SLUG_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
@@ -82,8 +91,10 @@ class LocalStore:
                 pass
 
     def save_asset(self, *, filename: str, content: bytes) -> AssetRecord:
+        # _inspect_raster may transcode (e.g. HEIC -> PNG), so checksum the
+        # bytes we actually store, not the original upload.
+        content, width, height, mode, extension = _inspect_raster(content, filename)
         checksum = hashlib.sha256(content).hexdigest()
-        width, height, mode, extension = _inspect_raster(content, filename)
         asset_id = checksum[:16]
         image_path = self.assets_dir / f"{asset_id}{extension}"
         image_path.write_bytes(content)
@@ -435,17 +446,26 @@ def _safe_extension(filename: str) -> str:
     return ".png"
 
 
-def _inspect_raster(content: bytes, filename: str) -> tuple[int, int, str, str]:
+def _inspect_raster(content: bytes, filename: str) -> tuple[bytes, int, int, str, str]:
+    """Validate an upload and return (stored_bytes, width, height, mode, extension).
+
+    HEIC/HEIF uploads (e.g. iPhone photos) are transcoded to PNG — browsers
+    can't render HEIC, so storing it as-is would break previews — with EXIF
+    orientation baked in. Every other supported format is stored byte-for-byte.
+    """
     try:
         with Image.open(io.BytesIO(content)) as image:
             image.verify()
         with Image.open(io.BytesIO(content)) as image:
-            width, height = image.size
-            mode = image.mode
-            extension = _extension_for_format(image.format, filename)
+            fmt = image.format
+            if fmt in ("HEIF", "HEIC"):
+                upright = ImageOps.exif_transpose(image).convert("RGB")
+                buffer = io.BytesIO()
+                upright.save(buffer, format="PNG")
+                return buffer.getvalue(), upright.width, upright.height, "RGB", ".png"
+            return content, image.width, image.height, image.mode, _extension_for_format(fmt, filename)
     except (UnidentifiedImageError, OSError) as exc:
         raise ValueError("upload must be a supported raster image") from exc
-    return width, height, mode, extension
 
 
 def _extension_for_format(image_format: str | None, filename: str) -> str:

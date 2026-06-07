@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Run the Colorworks web server on 0.0.0.0:8765 (reachable on the local network).
+# Override the port with: PORT=9000 ./serve
+# Restrict to this machine only with: HOST=127.0.0.1 ./serve
+set -euo pipefail
+cd "$(dirname "$0")"
+PORT="${PORT:-8765}"
+HOST="${HOST:-0.0.0.0}"
+DATA_DIR="${DATA_DIR:-colorworks_data}"
+exec python -m colorworks.web.server --host "$HOST" --port "$PORT" --data-dir "$DATA_DIR" "$@"
