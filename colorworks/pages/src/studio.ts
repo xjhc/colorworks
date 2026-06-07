@@ -22,15 +22,6 @@ import {
 } from "./colorworks";
 import { renderDepixelate, type DepixelateOptions } from "./depixelate";
 import { renderRepixel, detectCandidates, toGlyphText, type RepixelOptions } from "./repixel";
-import {
-  fitGlyphDocument,
-  renderGlyphDocument,
-  renderGlyphResidual,
-  glyphDocumentToText,
-  glyphDocumentToJSON,
-  type GlyphfitOptions,
-  type GlyphDocument,
-} from "./glyphfit";
 import { boxFit, conformIndexed, type FitMode } from "./output_size";
 
 // Fixed seed — mirrors the studio's seed=42 so blue-noise/flow/maze are stable.
@@ -76,10 +67,7 @@ const state = {
   exportUrl: "",
   thumbUrl: "",
   offscreen: null as HTMLCanvasElement | null,
-  glyphText: "" as string, // braille+block text of the native repixel/glyphfit render
-  glyphDoc: null as GlyphDocument | null, // full glyph document (glyphfit only)
-  glyphResidual: null as RenderState | null, // conformed residual heatmap (glyphfit)
-  showResidual: false, // residual-view toggle (glyphfit)
+  glyphText: "" as string, // braille+block text of the native repixel render (repixel only)
 };
 
 function styleById(id: string): StyleDef {
@@ -411,13 +399,10 @@ function renderFocus(): void {
     const style = styleById(state.styleId);
     const vals = gatherValues();
     let repixelInfo = ""; // candidate pixel-size readout (repixel only)
-    let glyphResidualNative: ReturnType<typeof renderGlyphResidual> | null = null;
-    state.glyphText = ""; // reset; set below for repixel / glyphfit
-    state.glyphDoc = null; // reset; set below for glyphfit
+    state.glyphText = ""; // reset; set below only for the repixel renderer
     // Depixelate and Repixel derive their own resolution from the full-res grid,
     // so they must see the source at native size (not the output-downscaled raster).
-    const gridRenderer =
-      style.renderer === "depixelate" || style.renderer === "repixel" || style.renderer === "glyphfit";
+    const gridRenderer = style.renderer === "depixelate" || style.renderer === "repixel";
     const raster = rasterizeSource(gridRenderer);
     let res: ReturnType<typeof renderToneDither>;
     if (style.renderer === "depixelate") {
@@ -455,28 +440,6 @@ function renderFocus(): void {
       repixelInfo =
         ` · ${star("fine")} fine ${cand.fine.toFixed(1)}px · ` +
         `${star("subject")} subject ${cand.subject.toFixed(1)}px`;
-    } else if (style.renderer === "glyphfit") {
-      const doc = fitGlyphDocument(raster, {
-        cellMode: vals.cell_mode as GlyphfitOptions["cellMode"],
-        cellW: numParam(vals, "cell_w", 16),
-        cellH: numParam(vals, "cell_h", 32),
-        phaseX: numParam(vals, "offset_x", 0),
-        phaseY: numParam(vals, "offset_y", 0),
-        alphabet: vals.alphabet as GlyphfitOptions["alphabet"],
-        colorModel: vals.color_model as GlyphfitOptions["colorModel"],
-        tau: numParam(vals, "tau", 45),
-        bgMode: vals.bg_mode as GlyphfitOptions["bgMode"],
-        bgColor: String(vals.bg_color ?? "#181818"),
-      });
-      res = renderGlyphDocument(doc);
-      glyphResidualNative = renderGlyphResidual(doc);
-      state.glyphDoc = doc;
-      state.glyphText = glyphDocumentToText(doc);
-      // Live grid readout — makes cell-size/offset alignment + residual visible.
-      const g = doc.grid;
-      repixelInfo =
-        ` · grid ${g.cellW}×${g.cellH}px · offset ${g.phaseX},${g.phaseY}` +
-        ` · cells ${doc.cols}×${doc.rows} · err ${doc.meanError.toFixed(0)}`;
     } else {
       res = renderToneDither(raster, toRenderOptions(vals));
     }
@@ -489,13 +452,6 @@ function renderFocus(): void {
     }
     state.render = { w: res.width, h: res.height, idx: res.indices, palette: res.palette };
     state.hoverIdx = null;
-    // Residual heatmap — conformed identically so it overlays the recon 1:1.
-    state.glyphResidual = null;
-    if (style.renderer === "glyphfit" && glyphResidualNative) {
-      const { maxW, maxH, fit } = state.setup;
-      const rr = conformIndexed(glyphResidualNative, maxW && maxW > 0 ? maxW : null, maxH && maxH > 0 ? maxH : null, fit);
-      state.glyphResidual = { w: rr.width, h: rr.height, idx: rr.indices, palette: rr.palette };
-    }
 
     const cv = $<HTMLCanvasElement>("#bigCanvas");
     cv.width = res.width;
@@ -509,12 +465,7 @@ function renderFocus(): void {
     $("#bigCaption").innerHTML = `<b>${name}</b> · ${res.width} × ${res.height} px${repixelInfo}`;
     $("#specDims").textContent = `${res.width} × ${res.height}`;
     $("#specRender").textContent = `${elapsed} ms`;
-    $("#copyGlyphs").hidden = style.renderer !== "repixel" && style.renderer !== "glyphfit";
-    $("#downloadJson").hidden = style.renderer !== "glyphfit";
-    const resBtn = $("#toggleResidual");
-    resBtn.hidden = style.renderer !== "glyphfit";
-    resBtn.textContent = state.showResidual ? "Show reconstruction" : "Show residual";
-    resBtn.classList.toggle("active", state.showResidual && !resBtn.hidden);
+    $("#copyGlyphs").hidden = style.renderer !== "repixel";
     $("#plateLoading").hidden = true;
 
     applyZoom();
@@ -524,17 +475,6 @@ function renderFocus(): void {
 
 // ── canvas paint (recolour + hover isolation) ─────────────────────────────────
 function redrawCanvas(): void {
-  // Residual view (glyphfit): paint the heatmap straight through — no recolour/hover.
-  if (state.showResidual && state.glyphResidual) {
-    const { w, h, idx, palette } = state.glyphResidual;
-    const out = new Uint8ClampedArray(idx.length * 4);
-    for (let p = 0, o = 0; p < idx.length; p++, o += 4) {
-      const c = palette[idx[p]];
-      out[o] = c[0]; out[o + 1] = c[1]; out[o + 2] = c[2]; out[o + 3] = 255;
-    }
-    $<HTMLCanvasElement>("#bigCanvas").getContext("2d")!.putImageData(new ImageData(out, w, h), 0, 0);
-    return;
-  }
   const R = state.render;
   if (!R) return;
   const { w: W, h: H, idx, palette } = R;
@@ -636,30 +576,9 @@ function openRecolor(hex: string): void {
 }
 
 // ── export (local PNG + Web Crypto checksum) ──────────────────────────────────
-/** Recoloured reconstruction as ImageData (no hover) — the faithful export image,
- *  independent of whether the canvas is currently showing the residual view. */
-function reconImageData(R: RenderState): ImageData {
-  const oc: RGB[] = R.palette.map((c) => {
-    const m = state.colorMap[rgbToHex(c)];
-    return m ? parseColor(m) : c;
-  });
-  const out = new Uint8ClampedArray(R.idx.length * 4);
-  for (let p = 0, o = 0; p < R.idx.length; p++, o += 4) {
-    const c = oc[R.idx[p]];
-    out[o] = c[0]; out[o + 1] = c[1]; out[o + 2] = c[2]; out[o + 3] = 255;
-  }
-  return new ImageData(out, R.w, R.h);
-}
-
 function updateExport(): void {
-  const R = state.render;
-  if (!R) return;
-  // Export from an offscreen of the recon (not #bigCanvas, which may show residual).
-  const off = (state.offscreen ??= document.createElement("canvas"));
-  off.width = R.w;
-  off.height = R.h;
-  off.getContext("2d")!.putImageData(reconImageData(R), 0, 0);
-  off.toBlob((blob) => {
+  const cv = $<HTMLCanvasElement>("#bigCanvas");
+  cv.toBlob((blob) => {
     if (!blob) return;
     if (state.exportUrl) URL.revokeObjectURL(state.exportUrl);
     state.exportUrl = URL.createObjectURL(blob);
@@ -795,19 +714,6 @@ async function copyGlyphText(): Promise<void> {
   }
 }
 
-// ── glyph document download (faithful: shape + colour) ────────────────────────
-function downloadGlyphJson(): void {
-  if (!state.glyphDoc) return;
-  const blob = new Blob([glyphDocumentToJSON(state.glyphDoc)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `${state.sourceName.replace(/\.[^.]+$/, "") || "image"}_glyphs.json`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  toast("Glyph JSON downloaded");
-}
-
 // ── init ──────────────────────────────────────────────────────────────────────
 function init(): void {
   buildStyleSelect();
@@ -823,14 +729,6 @@ function init(): void {
     updateExport();
   });
   $("#copyGlyphs").addEventListener("click", () => copyGlyphText());
-  $("#downloadJson").addEventListener("click", () => downloadGlyphJson());
-  $("#toggleResidual").addEventListener("click", () => {
-    state.showResidual = !state.showResidual;
-    const b = $("#toggleResidual");
-    b.textContent = state.showResidual ? "Show reconstruction" : "Show residual";
-    b.classList.toggle("active", state.showResidual);
-    redrawCanvas();
-  });
   showStudio(false);
 
   let resizeRAF = 0;

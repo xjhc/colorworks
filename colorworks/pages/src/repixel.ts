@@ -183,7 +183,7 @@ export function detectCandidates(r: Raster): { fine: number; subject: number } {
 
 /** The most common colour over the whole frame (the background, ~95% on the
  *  target screenshots). Reuses depixelate's modal sampler. */
-export function globalBg(r: Raster): RGB {
+function globalBg(r: Raster): RGB {
   return windowMode(r.data, r.width, 0, r.width - 1, 0, r.height - 1).colour;
 }
 
@@ -393,7 +393,7 @@ export function recoverCoverage(r: Raster, opts: RepixelOptions = {}): {
 // ── glyph-text export ─────────────────────────────────────────────────────────
 
 /** Unicode braille dot bit for a sub-cell at (col 0..1, row 0..3). */
-export const brailleBit = (cx: number, ry: number): number => (ry < 3 ? cx * 3 + ry : 6 + cx);
+const brailleBit = (cx: number, ry: number): number => (ry < 3 ? cx * 3 + ry : 6 + cx);
 
 /** Re-encode a recovered bitmap back into braille + block glyph text — the inverse
  *  of the terminal art it came from. Each char packs one 2x4 block of cells, so

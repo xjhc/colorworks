@@ -1,23 +1,50 @@
-# Glyph-fit renderer — design & implementation plan
+# Glyph-fit — ABANDONED (postmortem)
 
-A glyph-**first** renderer for the Colorworks Pages SPA. Where today's
-`repixel` recovers a bitmap and *then* (optionally) re-encodes it to glyph text,
-`glyphfit` makes the constrained glyph the primary representation: fit each
-character cell to an *allowed* block/braille glyph, store per-subpixel colour,
-and render/export by expanding those masks back to colour.
+**Status: removed from the Colorworks Pages SPA.** The older "Glyph art" (repixel)
+mode stays. This file is kept only as the record of *why* glyph-fit didn't work;
+everything below "Historical design" is the design of the renderer that was built
+and then removed.
 
-Status: **built & shipped** (see §8 for the as-built notes). This doc is the design
-of record; §0 is the locked goal.
+## Why it didn't work
 
-> **Revision 2** — folds in a design review. Three load-bearing fixes vs rev 1:
-> (1) a **canonical 2×4 subgrid** so mixed block+braille cells share one render
-> grid; (2) **shape fitting separated from colour attachment** so `per_subpixel`
-> scoring isn't degenerate (full glyph no longer trivially wins); (3) a real
-> **`GlyphGrid` with phase/origin**, not just cell W/H. Plus: drop the renderer
-> `scale` knob (output-size owns scaling), spell out SPA state/UI wiring, and
-> note the private helpers that must be exported.
+Goal: recover the source's *glyph structure* — braille dot-fields (planet, stars,
+comet) and a block sprite (frog) — as a faithful glyph document. On the hero image
+(`Screenshot_20260604_144633.png`), everything but the frog is braille; glyph-fit
+never recovers that. Three structural reasons:
+
+1. **It never classifies regions.** glyph-fit applies ONE strategy everywhere —
+   per-cell 2-means -> binary 2x4 mask -> nearest glyph. It has no notion of
+   "braille dither field" vs "block sprite" vs "text", so it can't honour that the
+   planet should be braille and the frog blocks. It just quantises every cell to
+   one fg/bg + a thresholded mask and emits whatever glyph that mask matches.
+
+2. **One global grid can't fit the image.** The braille background sits on a 16x32
+   terminal cell (8px dots); the frog sprite is an incommensurate ~12.4px grid
+   (measured). A single grid is right for one and wrong for the other.
+
+3. **The fit can't represent braille.** Real braille is a sub-cell dot pattern,
+   anti-aliased. Collapsing a 16x32 cell to one fg/bg + an 8-bit on/off mask
+   discards the dot pattern and tone, so braille fields come back as coarse blobs,
+   not braille.
+
+Net: it conflates "detect the glyph structure" with "quantise each cell to two
+colours", and does neither — detecting neither braille-vs-block regions nor the
+true braille dot patterns. The plausible-looking reconstruction hid this: it is a
+2-colour-per-cell downsample relabelled as glyphs, not a recovery of the source
+glyphs. A passable raster is not a faithful glyph document, which was the point.
+
+## What it would have taken
+
+Per-region **segmentation** first (sprite vs dither-field vs text), then a separate
+grid + strategy per region: block/fg-bg for the sprite at its own pitch; **true
+braille-pattern matching at the dot lattice** for the dither field (read the 2x4
+dots, don't 2-means the whole cell); leave text alone. That is the composite /
+multi-grid problem — substantially harder than a single-grid fitter, and out of
+scope for the SPA.
 
 ---
+
+# Historical design (the removed renderer)
 
 ## 0. Goal & success criteria (the north star)
 

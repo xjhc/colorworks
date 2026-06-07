@@ -416,123 +416,7 @@ export const REPIXEL_PARAMS: ParamDef[] = [
   },
 ];
 
-/** Glyphfit params (mirror of glyphfit.ts GlyphfitOptions). */
-export const GLYPHFIT_PARAMS: ParamDef[] = [
-  {
-    key: "cell_mode",
-    label: "Cell grid",
-    type: "str",
-    default: "auto",
-    group: "pattern",
-    options: [
-      { value: "auto", label: "Auto-detect" },
-      { value: "manual", label: "Manual size + offset" },
-    ],
-  },
-  {
-    key: "cell_w",
-    label: "Cell width (px)",
-    type: "int",
-    default: 16,
-    min: 2,
-    max: 64,
-    step: 1,
-    group: "pattern",
-    visibleWhen: { param: "cell_mode", equals: ["manual"] },
-  },
-  {
-    key: "cell_h",
-    label: "Cell height (px)",
-    type: "int",
-    default: 32,
-    min: 4,
-    max: 96,
-    step: 1,
-    group: "pattern",
-    visibleWhen: { param: "cell_mode", equals: ["manual"] },
-  },
-  {
-    key: "offset_x",
-    label: "Offset X (px)",
-    type: "int",
-    default: 0,
-    min: 0,
-    max: 63,
-    step: 1,
-    group: "pattern",
-    visibleWhen: { param: "cell_mode", equals: ["manual"] },
-  },
-  {
-    key: "offset_y",
-    label: "Offset Y (px)",
-    type: "int",
-    default: 0,
-    min: 0,
-    max: 95,
-    step: 1,
-    group: "pattern",
-    visibleWhen: { param: "cell_mode", equals: ["manual"] },
-  },
-  {
-    key: "alphabet",
-    label: "Alphabet",
-    type: "str",
-    default: "blocks_braille",
-    group: "pattern",
-    options: [
-      { value: "blocks_braille", label: "Blocks + braille" },
-      { value: "braille", label: "Braille only" },
-      { value: "blocks", label: "Blocks only" },
-    ],
-  },
-  {
-    key: "color_model",
-    label: "Colour model",
-    type: "str",
-    // fg_bg = one foreground + one background per cell (the terminal's own model —
-    // faithful recovery, denoises anti-aliasing). per_subpixel = each lit dot keeps
-    // its own colour (expressive, for approximating arbitrary images; lossy to text).
-    default: "fg_bg",
-    group: "palette",
-    options: [
-      { value: "fg_bg", label: "Foreground / background (recover)" },
-      { value: "per_subpixel", label: "Per-subpixel (expressive)" },
-    ],
-  },
-  {
-    key: "tau",
-    label: "Foreground threshold",
-    type: "int",
-    default: 45,
-    min: 0,
-    max: 255,
-    step: 1,
-    group: "pattern",
-    visibleWhen: { param: "color_model", equals: ["per_subpixel"] },
-  },
-  {
-    key: "bg_mode",
-    label: "Background",
-    type: "str",
-    default: "auto",
-    group: "pattern",
-    options: [
-      { value: "auto", label: "Auto-detect" },
-      { value: "custom", label: "Custom color" },
-    ],
-  },
-  {
-    key: "bg_color",
-    label: "Background color",
-    type: "str",
-    default: "#181818",
-    group: "pattern",
-    uiHint: "color",
-    visibleWhen: { param: "bg_mode", equals: ["custom"] },
-  },
-];
-
-export type RendererId = "tone_dither" | "depixelate" | "repixel" | "glyphfit";
+export type RendererId = "tone_dither" | "depixelate" | "repixel";
 
 export interface StyleDef {
   id: string;
@@ -570,14 +454,6 @@ export const STYLES: StyleDef[] = [
     params: REPIXEL_PARAMS,
     fixed: {},
   },
-  {
-    id: "glyphfit",
-    label: "Glyph fit — block/braille document",
-    description: "Fit the image to a constrained block + braille glyph document (one glyph + colour per cell), render it back, and export glyph text / JSON. Glyph-first, unlike Glyph art's post-hoc text.",
-    renderer: "glyphfit",
-    params: GLYPHFIT_PARAMS,
-    fixed: {},
-  },
 ];
 
 export const DEFAULT_STYLE_ID = "flow";
@@ -589,7 +465,7 @@ export function styleParams(style: StyleDef): ParamDef[] {
 
 /** Convenience: the param defs keyed for lookup. */
 export const PARAM_BY_KEY: Record<string, ParamDef> = Object.fromEntries(
-  [...TONE_DITHER_PARAMS, ...DEPIXELATE_PARAMS, ...REPIXEL_PARAMS, ...GLYPHFIT_PARAMS].map((p) => [p.key, p]),
+  [...TONE_DITHER_PARAMS, ...DEPIXELATE_PARAMS, ...REPIXEL_PARAMS].map((p) => [p.key, p]),
 );
 
 export type { DitherMethod, PaletteMode };
