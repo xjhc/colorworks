@@ -377,6 +377,9 @@ export const REPIXEL_PARAMS: ParamDef[] = [
     // sprites stay full-colour. OFF: flat two-tone (crisp ink vs background).
     default: true,
     group: "pattern",
+    // Composite forces a crisp background internally (its background is a dither
+    // field), so the toggle would be a no-op there — hide it for that target.
+    visibleWhen: { param: "target", equals: ["fine", "subject", "manual"] },
   },
   {
     key: "palette",

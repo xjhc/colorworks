@@ -472,7 +472,9 @@ function recoverComposite(r: Raster, opts: RepixelOptions): Recovery {
   const satThr = opts.spriteSat ?? 0.3;
   const eyeLuma = opts.eyeLuma ?? 45;
   const { width: W, height: H } = r;
-  const fine = recover(r, { ...opts, target: "fine" });      // background bitmap (fine grid)
+  // Background is a dither FIELD, not tone-modulated halftone, so recover it crisp
+  // (two-tone) — area-averaging (shade) collapses a dark dot field to near-black.
+  const fine = recover(r, { ...opts, target: "fine", shade: false });
   const m = spriteMasks(r, satThr, eyeLuma);
   const art = regridSprite(r, detectSubjectGrid(r), m, 0.45, 0.25, eyeLuma);
   const fineGrid = detectGrid(r);
