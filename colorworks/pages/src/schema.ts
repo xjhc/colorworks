@@ -305,8 +305,37 @@ export const REPIXEL_PARAMS: ParamDef[] = [
     options: [
       { value: "fine", label: "Fine glyph field (background)" },
       { value: "subject", label: "Color subject pitch (sprite)" },
+      { value: "composite", label: "Composite (background + sprite)" },
       { value: "manual", label: "Manual pitch" },
     ],
+  },
+  {
+    key: "sprite_sat",
+    label: "Sprite saturation",
+    type: "float",
+    // RELATIVE saturation (max-min)/max above which a pixel belongs to the colour
+    // sprite (vs the grey/white braille background). Lower = grabs more of the
+    // sprite, including its shadowed edges. Relative (not absolute) so dark
+    // sprite pixels still enclose the silhouette around the eyes.
+    default: 0.3,
+    min: 0.1,
+    max: 0.7,
+    step: 0.05,
+    group: "pattern",
+    visibleWhen: { param: "target", equals: ["composite"] },
+  },
+  {
+    key: "eye_luma",
+    label: "Eye darkness",
+    type: "int",
+    // Luma below which a pixel INSIDE the sprite body counts as a dark eye/detail.
+    // Near-black eyes read as high saturation, so they're found by luma, not colour.
+    default: 45,
+    min: 0,
+    max: 150,
+    step: 5,
+    group: "pattern",
+    visibleWhen: { param: "target", equals: ["composite"] },
   },
   {
     key: "pitch",

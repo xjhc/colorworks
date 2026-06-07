@@ -430,6 +430,8 @@ function renderFocus(): void {
         paperColor: String(vals.paper_color ?? "#f4ebd9"),
         bgMode: vals.bg_mode as RepixelOptions["bgMode"],
         bgColor: String(vals.bg_color ?? "#181818"),
+        spriteSat: numParam(vals, "sprite_sat", 0.3),
+        eyeLuma: numParam(vals, "eye_luma", 45),
       });
       // Capture the braille+block glyph text from the NATIVE grid (1px/cell),
       // before conformIndexed upscales it (which would break the 2x4 grouping).
