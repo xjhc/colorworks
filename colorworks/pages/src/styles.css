@@ -432,6 +432,9 @@ input[type=checkbox]:checked::after { transform: translateX(15px); background: v
 .export-btn:hover { background: var(--ink); }
 .export-btn:active { transform: translate(3px,3px); box-shadow: 1px 1px 0 rgba(28,23,18,.1); }
 .export-btn.disabled { background: var(--line); color: var(--muted); pointer-events: none; box-shadow: none; }
+.export-btn.ghost { width: 100%; margin-top: 8px; background: var(--paper-2); color: var(--ink);
+  border: 1.5px solid var(--ink); box-shadow: none; font-size: 14px; padding: 10px; }
+.export-btn.ghost:hover { background: var(--ink); color: var(--paper-2); }
 
 /* toast */
 .toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%) translateY(20px);

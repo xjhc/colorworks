@@ -103,7 +103,7 @@ const mean = (a: Float64Array): number => {
 
 /** Coarse fundamental period: the smallest autocorrelation peak within half the
  *  strongest, so we land on the fundamental rather than a 2x/3x harmonic. */
-function fundamental(sig: Float64Array, minP: number, maxP: number): number {
+export function fundamental(sig: Float64Array, minP: number, maxP: number): number {
   const m = mean(sig);
   const s = new Float64Array(sig.length);
   for (let i = 0; i < sig.length; i++) s[i] = sig[i] - m;
@@ -128,7 +128,7 @@ function fundamental(sig: Float64Array, minP: number, maxP: number): number {
   return peaks[0][0];
 }
 
-function combScore(sig: Float64Array, pitch: number, phase: number): number {
+export function combScore(sig: Float64Array, pitch: number, phase: number): number {
   let sum = 0;
   let count = 0;
   for (let x = phase; x < sig.length; x += pitch) {
@@ -141,7 +141,7 @@ function combScore(sig: Float64Array, pitch: number, phase: number): number {
   return count ? sum / count : 0;
 }
 
-function bestPhase(sig: Float64Array, pitch: number): { phase: number; score: number } {
+export function bestPhase(sig: Float64Array, pitch: number): { phase: number; score: number } {
   let score = -Infinity;
   let phase = 0;
   for (let ph = 0; ph < pitch; ph += 0.5) {
@@ -182,7 +182,7 @@ export function detectGrid(r: Raster, minPitch = 6, maxPitch = 64): Grid {
   return { pitchX: pitch, pitchY: pitch, phaseX: phx.phase, phaseY: phy.phase, confidence };
 }
 
-function gridOrigin(g: Grid): [number, number] {
+export function gridOrigin(g: Grid): [number, number] {
   // _best_phase locks onto the boundary comb, which can land near a cell's far
   // edge; fold any phase past the half-pitch back so the origin sits near 0.
   const ox = g.phaseX > g.pitchX / 2 ? g.phaseX - g.pitchX : g.phaseX;
@@ -231,11 +231,11 @@ function ditherOrder(n: number): number[][] {
 }
 
 const colourKey = (r: number, g: number, b: number): number => (r << 16) | (g << 8) | b;
-const dist = (r: number, g: number, b: number, c: RGB): number =>
+export const dist = (r: number, g: number, b: number, c: RGB): number =>
   Math.max(Math.abs(r - c[0]), Math.abs(g - c[1]), Math.abs(b - c[2]));
 
 /** Most common colour in a window of the raster. */
-function windowMode(
+export function windowMode(
   data: Uint8ClampedArray,
   W: number,
   x0: number,
@@ -417,7 +417,7 @@ export function reduceToTiles(r: Raster, grid: Grid, block: number, opts: TileOp
 
 /** Index a small raster into a palette + per-pixel indices (RenderResult shape),
  *  so the studio's recolour / swatch / export machinery applies unchanged. */
-function rasterToIndexed(r: Raster): RenderResult {
+export function rasterToIndexed(r: Raster): RenderResult {
   const { width, height, data } = r;
   const n = width * height;
   const indices = new Uint16Array(n);
