@@ -476,57 +476,83 @@ const BG_SHADES: RGB[] = [
   [245, 245, 245],
 ];
 
-/** Remap each LIT background cell (coverage > 0) onto the bright 3-tone ramp by
- *  its recovered luma. Unlit cells are background and left untouched. Run before
- *  the sprite overlay so only the braille field is shaded, not the colour sprite. */
-function shadeBackground(rec: Recovery): void {
-  const { data, coverage } = rec;
-  for (let cell = 0; cell < coverage.length; cell++) {
-    if (coverage[cell] <= 0) continue; // unlit → stays background colour
-    const o = cell * 4;
-    const b = 0.299 * data[o] + 0.587 * data[o + 1] + 0.114 * data[o + 2];
-    const g = BG_SHADES[b >= 175 ? 2 : b >= 105 ? 1 : 0];
-    data[o] = g[0];
-    data[o + 1] = g[1];
-    data[o + 2] = g[2];
-  }
-}
+/** Grey from the 3-tone ramp for a recovered cell luma (cuts at 105 / 175). */
+const bgShade = (luma: number): RGB => BG_SHADES[luma >= 175 ? 2 : luma >= 105 ? 1 : 0];
 
-/** Composite recovery: background on the fine lattice, the colour sprite snapped to
- *  its own subject grid and overlaid wherever the body silhouette covers a cell. */
+/** Composite recovery — rendered at SOURCE resolution to reproduce the braille-art
+ *  look of the standalone prototype. The background braille field is drawn as
+ *  individual DOTS (a gapped square per lit lattice cell, tinted onto the bright
+ *  3-tone ramp); the colour sprite is snapped to its own grid and drawn as solid
+ *  pixels on top. NB the prior one-output-pixel-per-cell version collapsed each dot
+ *  into a solid block (blocky mush at any size) — drawing real dots with gaps (≈ the
+ *  prototype's dot=6 on an 8px pitch) is what actually reads as braille. Because the
+ *  gaps are intrinsic to the bitmap, this output must NOT be nearest-neighbour
+ *  downscaled (studio skips conform for composite); the browser/export keep it crisp. */
 function recoverComposite(r: Raster, opts: RepixelOptions): Recovery {
   const satThr = opts.spriteSat ?? 0.3;
   const eyeLuma = opts.eyeLuma ?? 45;
   const { width: W, height: H } = r;
-  // Background is a dither FIELD, not tone-modulated halftone, so recover it crisp
-  // (two-tone) — area-averaging (shade) collapses a dark dot field to near-black.
+  const bg: RGB =
+    (opts.bgMode ?? "auto") === "custom" ? parseColor(opts.bgColor ?? "#181818") : globalBg(r);
+
+  // 1) Fine braille lattice (two-tone) → which cells are lit, and their tone.
   const fine = recover(r, { ...opts, target: "fine", shade: false });
-  // Then tint the lit braille cells onto a bright 3-tone grey ramp so the field
-  // reads as clean poster shapes, not dim dotty original colours (the look the
-  // standalone prototype produced; "original" colours here are too dark/noisy).
-  shadeBackground(fine);
-  const m = spriteMasks(r, satThr, eyeLuma);
-  const art = regridSprite(r, detectSubjectGrid(r), m, 0.45, 0.25, eyeLuma);
   const fineGrid = detectGrid(r);
   const [ox, oy] = gridOrigin(fineGrid);
   const { pitchX: px, pitchY: py } = fineGrid;
+
+  // 2) Colour sprite snapped to its own (subject) grid → one clean colour per pixel.
+  const m = spriteMasks(r, satThr, eyeLuma);
+  const art = regridSprite(r, detectSubjectGrid(r), m, 0.45, 0.25, eyeLuma);
+
+  // 3) Paint a source-resolution canvas: background colour, then gapped braille
+  //    dots, then solid sprite pixels on top (compositing order).
+  const data = new Uint8ClampedArray(W * H * 4);
+  for (let o = 0; o < data.length; o += 4) {
+    data[o] = bg[0]; data[o + 1] = bg[1]; data[o + 2] = bg[2]; data[o + 3] = 255;
+  }
+  const litColors: RGB[] = [];
+  const fill = (x0: number, y0: number, w: number, h: number, c: RGB): void => {
+    const xa = Math.max(0, x0), xb = Math.min(W, x0 + w);
+    const ya = Math.max(0, y0), yb = Math.min(H, y0 + h);
+    for (let y = ya; y < yb; y++) {
+      let o = (y * W + xa) * 4;
+      for (let x = xa; x < xb; x++, o += 4) {
+        data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255;
+      }
+    }
+  };
+
+  // Background dots: each fills ~72% of the lattice pitch, leaving the inter-dot gap.
+  const dotW = Math.max(1, Math.round(px * 0.72));
+  const dotH = Math.max(1, Math.round(py * 0.72));
   for (let rr = 0; rr < fine.height; rr++) {
-    const cy = Math.round(oy + (rr + 0.5) * py);
-    if (cy < 0 || cy >= H) continue;
     for (let cc = 0; cc < fine.width; cc++) {
+      const cell = rr * fine.width + cc;
+      if (fine.coverage[cell] <= 0) continue; // unlit → background
+      const fo = cell * 4;
+      const lum = 0.299 * fine.data[fo] + 0.587 * fine.data[fo + 1] + 0.114 * fine.data[fo + 2];
+      const g = bgShade(lum);
       const cx = Math.round(ox + (cc + 0.5) * px);
-      if (cx < 0 || cx >= W || !m.body[cy * W + cx]) continue;            // outside sprite
-      const i = Math.floor((cx - art.ox) / art.px);
-      const j = Math.floor((cy - art.oy) / art.py);
-      if (i < 0 || i >= art.cols || j < 0 || j >= art.rows) continue;
-      const col = art.cells[j * art.cols + i];
-      if (!col) continue;
-      const cell = rr * fine.width + cc, o = cell * 4;
-      fine.data[o] = col[0]; fine.data[o + 1] = col[1]; fine.data[o + 2] = col[2];
-      fine.coverage[cell] = 1; fine.litColors.push(col);
+      const cy = Math.round(oy + (rr + 0.5) * py);
+      fill(cx - (dotW >> 1), cy - (dotH >> 1), dotW, dotH, g);
+      litColors.push(g);
     }
   }
-  return fine;
+
+  // Colour sprite: solid pixels on top (one block per snapped native pixel).
+  const blockW = Math.round(art.px) + 1;
+  const blockH = Math.round(art.py) + 1;
+  for (let j = 0; j < art.rows; j++) {
+    for (let i = 0; i < art.cols; i++) {
+      const col = art.cells[j * art.cols + i];
+      if (!col) continue;
+      fill(Math.round(art.ox + i * art.px), Math.round(art.oy + j * art.py), blockW, blockH, col);
+      litColors.push(col);
+    }
+  }
+
+  return { width: W, height: H, data, coverage: new Float32Array(0), bg, litColors };
 }
 
 /** Recover the logical bitmap: one output pixel per detected sub-cell. */

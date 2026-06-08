@@ -233,15 +233,21 @@ describe("repixel — composite target", () => {
 
   it("recovers the braille background AND overlays the colour sprite", () => {
     const res = renderRepixel(scene(), { target: "composite", shade: false, bgMode: "custom", bgColor: "#141414" });
-    expect(res.width).toBeGreaterThanOrEqual(14); // fine 7px lattice → ~16 cols
+    // Composite renders at SOURCE resolution (gapped dots, not one px per cell), so
+    // the dots keep the inter-dot gap that reads as braille (not solid blocks).
+    expect(res.width).toBe(112);
+    expect(res.height).toBe(112);
     let grey = 0;
     let salmon = 0;
+    let bgGap = 0;
     for (let i = 0; i < res.indices.length; i++) {
       const c = res.palette[res.indices[i]];
       if (Math.abs(c[0] - c[1]) < 25 && Math.abs(c[1] - c[2]) < 25 && c[0] > 140) grey++; // braille dot
       if (c[0] > 150 && c[0] > c[2] + 40) salmon++; // sprite ink
+      if (c[0] < 40 && c[1] < 40 && c[2] < 40) bgGap++; // background (gaps between dots)
     }
     expect(grey).toBeGreaterThan(20); // background dots recovered outside the sprite
     expect(salmon).toBeGreaterThan(4); // sprite block overlaid in its own colour
+    expect(bgGap).toBeGreaterThan(grey); // gaps dominate → dots are separated, not solid
   });
 });

@@ -418,7 +418,7 @@ function renderFocus(): void {
         fillMult: numParam(vals, "fill_mult", 1),
       });
     } else if (style.renderer === "repixel") {
-      res = renderRepixel(raster, {
+      const repixelOpts: RepixelOptions = {
         target: vals.target as RepixelOptions["target"],
         pitch: numParam(vals, "pitch", 0),
         tau: numParam(vals, "tau", 45),
@@ -432,10 +432,16 @@ function renderFocus(): void {
         bgColor: String(vals.bg_color ?? "#181818"),
         spriteSat: numParam(vals, "sprite_sat", 0.3),
         eyeLuma: numParam(vals, "eye_luma", 45),
-      });
-      // Capture the braille+block glyph text from the NATIVE grid (1px/cell),
-      // before conformIndexed upscales it (which would break the 2x4 grouping).
-      state.glyphText = toGlyphText(res);
+      };
+      res = renderRepixel(raster, repixelOpts);
+      // Glyph text needs a NATIVE 1px/cell grid (the 2x4 braille grouping). Composite
+      // renders at source resolution (gapped dots), so derive its glyph text from a
+      // separate fine pass rather than from `res`.
+      state.glyphText = toGlyphText(
+        vals.target === "composite"
+          ? renderRepixel(raster, { ...repixelOpts, target: "fine" })
+          : res,
+      );
       // Candidate pixel sizes for the readout — the image may carry two scales.
       const cand = detectCandidates(raster);
       const star = (t: string) => (vals.target === t ? "●" : "○");
@@ -448,7 +454,9 @@ function renderFocus(): void {
     // The grid renderers detect + tile on the native grid, so their raw output
     // size is decoupled from the output-size control; scale to the requested size
     // so the preview and exported PNG honour it (other renderers already do).
-    if (gridRenderer) {
+    // EXCEPT composite: it draws gapped braille dots at source resolution, and
+    // nearest-neighbour downscaling would alias the dots away — so it keeps native.
+    if (gridRenderer && vals.target !== "composite") {
       const { maxW, maxH, fit } = state.setup;
       res = conformIndexed(res, maxW && maxW > 0 ? maxW : null, maxH && maxH > 0 ? maxH : null, fit);
     }
