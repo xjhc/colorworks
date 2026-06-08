@@ -299,8 +299,10 @@ export const REPIXEL_PARAMS: ParamDef[] = [
     type: "str",
     // Which scale to lock onto. The image can carry two: a fine glyph/braille
     // lattice (background) and a coarser colour sprite (foreground). There is no
-    // single "real" pixel size — pick the one this render is for.
-    default: "fine",
+    // single "real" pixel size — pick the one this render is for. Composite is the
+    // default: it recovers both at once (braille field + colour sprite) and is the
+    // "good decode out of the box" for the braille-art screenshots this mode targets.
+    default: "composite",
     group: "pattern",
     options: [
       { value: "fine", label: "Fine glyph field (background)" },

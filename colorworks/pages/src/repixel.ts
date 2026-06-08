@@ -466,6 +466,32 @@ function regridSprite(r: Raster, grid: Grid, m: SpriteMasks, bodyThr: number, ey
   return { cols, rows, ox, oy, px, py, cells };
 }
 
+/** Bright 3-tone grey ramp for the braille background (mirrors the prototype's
+ *  SHADE3). Lit cells are remapped onto it by their cluster luma so the dither
+ *  field reads as crisp poster shapes instead of dim, varied original colours.
+ *  Cuts are on the 0..255 luma scale: <105 → dim, <175 → mid, else bright. */
+const BG_SHADES: RGB[] = [
+  [112, 112, 112],
+  [180, 180, 180],
+  [245, 245, 245],
+];
+
+/** Remap each LIT background cell (coverage > 0) onto the bright 3-tone ramp by
+ *  its recovered luma. Unlit cells are background and left untouched. Run before
+ *  the sprite overlay so only the braille field is shaded, not the colour sprite. */
+function shadeBackground(rec: Recovery): void {
+  const { data, coverage } = rec;
+  for (let cell = 0; cell < coverage.length; cell++) {
+    if (coverage[cell] <= 0) continue; // unlit → stays background colour
+    const o = cell * 4;
+    const b = 0.299 * data[o] + 0.587 * data[o + 1] + 0.114 * data[o + 2];
+    const g = BG_SHADES[b >= 175 ? 2 : b >= 105 ? 1 : 0];
+    data[o] = g[0];
+    data[o + 1] = g[1];
+    data[o + 2] = g[2];
+  }
+}
+
 /** Composite recovery: background on the fine lattice, the colour sprite snapped to
  *  its own subject grid and overlaid wherever the body silhouette covers a cell. */
 function recoverComposite(r: Raster, opts: RepixelOptions): Recovery {
@@ -475,6 +501,10 @@ function recoverComposite(r: Raster, opts: RepixelOptions): Recovery {
   // Background is a dither FIELD, not tone-modulated halftone, so recover it crisp
   // (two-tone) — area-averaging (shade) collapses a dark dot field to near-black.
   const fine = recover(r, { ...opts, target: "fine", shade: false });
+  // Then tint the lit braille cells onto a bright 3-tone grey ramp so the field
+  // reads as clean poster shapes, not dim dotty original colours (the look the
+  // standalone prototype produced; "original" colours here are too dark/noisy).
+  shadeBackground(fine);
   const m = spriteMasks(r, satThr, eyeLuma);
   const art = regridSprite(r, detectSubjectGrid(r), m, 0.45, 0.25, eyeLuma);
   const fineGrid = detectGrid(r);
