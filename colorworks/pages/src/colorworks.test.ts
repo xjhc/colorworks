@@ -219,7 +219,7 @@ describe("renderToneDither", () => {
     const h = 30;
     const raster = makeRaster(w, h, (x, y) => [(x * 6) % 256, (y * 8) % 256, (x * y) % 256]);
 
-    for (const method of ["bayer", "blue_noise", "floyd_steinberg", "flow", "maze", "flat"] as const) {
+    for (const method of ["bayer", "blue_noise", "floyd_steinberg", "flow", "flat"] as const) {
       const res = renderToneDither(raster, { colors: 5, palette: "adaptive", method, seed: 42 });
       expect(res.indices.length).toBe(w * h);
       expect(res.width).toBe(w);

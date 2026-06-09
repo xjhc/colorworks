@@ -63,27 +63,15 @@ export const TONE_DITHER_PARAMS: ParamDef[] = [
     key: "method",
     label: "Dither Method",
     type: "str",
-    default: "bayer",
+    default: "floyd_steinberg",
     group: "pattern",
     options: [
       { value: "bayer", label: "Ordered (Bayer)" },
       { value: "blue_noise", label: "Blue Noise" },
       { value: "floyd_steinberg", label: "Floyd–Steinberg" },
       { value: "flow", label: "Flow (waves)" },
-      { value: "maze", label: "Maze (labyrinth)" },
       { value: "flat", label: "Flat poster (no dither)" },
     ],
-  },
-  {
-    key: "mask_scale",
-    label: "Maze Cell Size (px)",
-    type: "float",
-    default: 5,
-    min: 2,
-    max: 24,
-    step: 0.5,
-    group: "pattern",
-    visibleWhen: { param: "method", equals: ["maze"] },
   },
   {
     key: "matrix_size",
@@ -470,7 +458,6 @@ export const STYLES: StyleDef[] = [
   { id: "bayer", label: "Ordered — Bayer grid", description: "Crisp grid dither across N tones", fixed: { method: "bayer" } },
   { id: "blue_noise", label: "Blue noise — grain", description: "Organic, grain-like dither", fixed: { method: "blue_noise" } },
   { id: "floyd_steinberg", label: "Floyd–Steinberg", description: "Error-diffused, fine texture", fixed: { method: "floyd_steinberg" } },
-  { id: "maze", label: "Maze — labyrinth", description: "Connected diagonal labyrinth", fixed: { method: "maze" } },
   { id: "flat", label: "Flat poster — no dither", description: "Flat N-colour poster", fixed: { method: "flat" } },
   {
     id: "depixelate",
@@ -480,17 +467,12 @@ export const STYLES: StyleDef[] = [
     params: DEPIXELATE_PARAMS,
     fixed: {},
   },
-  {
-    id: "repixel",
-    label: "Glyph art — braille + blocks",
-    description: "Recover pixel-art from terminal screenshots drawn with braille + block characters; each glyph cell becomes one true pixel",
-    renderer: "repixel",
-    params: REPIXEL_PARAMS,
-    fixed: {},
-  },
+  // NOTE: "Glyph art" (repixel) is intentionally unlisted — it doesn't work well
+  // yet. The renderer (repixel.ts), REPIXEL_PARAMS, and the studio wiring are kept
+  // so it can be re-enabled by restoring a StyleDef here with renderer:"repixel".
 ];
 
-export const DEFAULT_STYLE_ID = "flow";
+export const DEFAULT_STYLE_ID = "floyd_steinberg";
 
 /** The param set a style exposes (its own, or the tone-dither default). */
 export function styleParams(style: StyleDef): ParamDef[] {

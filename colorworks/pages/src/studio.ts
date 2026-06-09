@@ -24,7 +24,7 @@ import { renderDepixelate, type DepixelateOptions } from "./depixelate";
 import { renderRepixel, detectCandidates, toGlyphText, type RepixelOptions } from "./repixel";
 import { boxFit, conformIndexed, type FitMode } from "./output_size";
 
-// Fixed seed — mirrors the studio's seed=42 so blue-noise/flow/maze are stable.
+// Fixed seed — mirrors the studio's seed=42 so blue-noise/flow are stable.
 const SEED = 42;
 
 // ── tiny DOM helpers ──────────────────────────────────────────────────────────
@@ -351,7 +351,6 @@ function toRenderOptions(v: Record<string, ParamValue>): RenderOptions {
     params: {
       matrixSize: num("matrix_size", 8),
       noiseSize: num("noise_size", 64),
-      maskScale: num("mask_scale", 5),
       frequency: num("frequency", 5),
       warp: num("warp", 7),
       angleDeg: num("angle_deg", 45),

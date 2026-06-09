@@ -2,8 +2,8 @@
 
 One algorithm, three knobs that matter: how many `colors`, which `palette`, and
 which dither `method`. The method selector spans crisp ordered (Bayer), organic
-blue-noise, error-diffused Floyd-Steinberg, and the two "artistic" masks — maze
-(Truchet labyrinth) and wave — for flowing, non-photographic texture.
+blue-noise, error-diffused Floyd-Steinberg, and the "artistic" flow/wave mask —
+for flowing, non-photographic texture.
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ DEFINITION = AlgorithmDefinition(
     role=AlgorithmRole.RENDERER,
     name="Dither (Multi-tone)",
     description="N-colour dithering: choose colours, palette, and dither texture "
-    "(ordered, blue-noise, Floyd-Steinberg, maze, or wave).",
+    "(ordered, blue-noise, Floyd-Steinberg, or wave).",
     input_spec=InputSpec(primary="raster", accepts_color=True),
     output_spec=OutputSpec(primary_artifact="final_raster", produces_composition=False),
     parameters=[
@@ -54,21 +54,14 @@ DEFINITION = AlgorithmDefinition(
         ),
         ParameterDef(
             "method", "Dither Method", ParameterType.STR,
-            default="bayer",
+            default="floyd_steinberg",
             options=[
                 OptionDef(value="bayer", label="Ordered (Bayer)"),
                 OptionDef(value="blue_noise", label="Blue Noise"),
                 OptionDef(value="floyd_steinberg", label="Floyd–Steinberg"),
                 OptionDef(value="flow", label="Flow (waves)"),
-                OptionDef(value="maze", label="Maze (labyrinth)"),
             ],
             group="pattern", invalidates=["final_raster"],
-        ),
-        ParameterDef(
-            "mask_scale", "Maze Cell Size (px)", ParameterType.FLOAT,
-            default=5.0, min=2.0, max=24.0, step=0.5,
-            group="pattern", invalidates=["final_raster"],
-            visible_when=Eq("method", "maze"),
         ),
         ParameterDef(
             "matrix_size", "Bayer Matrix Size", ParameterType.INT,
@@ -171,7 +164,7 @@ class ToneDitherRenderer(StagedAlgorithm):
             ctx.input.image,
             colors=int(p.get("colors", 4)),
             palette_mode=str(p.get("palette", "adaptive")),
-            method=str(p.get("method", "bayer")),
+            method=str(p.get("method", "floyd_steinberg")),
             contrast=float(p.get("contrast", 1.0)),
             midpoint=float(p.get("midpoint", 0.5)),
             ink_color=str(p.get("ink_color", "#161616")),
@@ -179,7 +172,6 @@ class ToneDitherRenderer(StagedAlgorithm):
             params={
                 "matrix_size": int(p.get("matrix_size", 8)),
                 "noise_size": int(p.get("noise_size", 64)),
-                "mask_scale": float(p.get("mask_scale", 5.0)),
                 "frequency": float(p.get("frequency", 5.0)),
                 "warp": float(p.get("warp", 7.0)),
                 "angle_deg": float(p.get("angle_deg", 45.0)),

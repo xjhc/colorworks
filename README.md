@@ -81,7 +81,7 @@ The intended loop is:
 
 Most of the gallery is powered by the **Dither (Multi-tone)** renderer, which
 honours the colour count — set *Colors = 4* and the Ordered, Blue-Noise,
-Floyd–Steinberg, Maze, and Wave cards all produce genuine 4-colour dithered
+Floyd–Steinberg, and Wave cards all produce genuine 4-colour dithered
 output (not just ink/paper). This is what produces the "N-colour photo broken
 into dither texture" look. `Flat (Pixel-art)` gives a flat N-colour quantize
 with no dither; the halftone/stipple cards (Pang, CVT) remain 1-bit and are
@@ -107,7 +107,7 @@ A single-algorithm workspace with every parameter exposed:
 
 | ID | Style | Notes |
 | -- | ----- | ----- |
-| `tone_dither` | Dither | **N-colour dithering.** 2-8 colours × palette (grayscale / adaptive / duotone) × method (ordered/Bayer, blue-noise, Floyd–Steinberg, maze, wave). The workhorse for the multi-colour dithered look. |
+| `tone_dither` | Dither | **N-colour dithering.** 2-8 colours × palette (grayscale / adaptive / duotone) × method (ordered/Bayer, blue-noise, Floyd–Steinberg, wave). The workhorse for the multi-colour dithered look. |
 | `palette_quantize` | Pixel art | 2-8 colors, median-cut, optional FS dither |
 | `ordered_bayer` | Dither | Crisp grid threshold matrix |
 | `floyd_steinberg` | Dither | Classic error diffusion |

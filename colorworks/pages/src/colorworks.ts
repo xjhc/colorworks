@@ -29,7 +29,6 @@ export type DitherMethod =
   | "blue_noise"
   | "floyd_steinberg"
   | "flow"
-  | "maze"
   | "flat";
 
 /** An RGBA raster, exactly the shape of `CanvasRenderingContext2D.getImageData`. */
@@ -43,7 +42,6 @@ export interface Raster {
 export interface RenderParams {
   matrixSize?: number; // bayer: 2 | 4 | 8 | 16
   noiseSize?: number; // blue_noise: 16 | 32 | 64 | 128
-  maskScale?: number; // maze cell size (px)
   frequency?: number; // flow: wave density
   warp?: number; // flow: flow strength
   angleDeg?: number; // flow: base angle
@@ -437,34 +435,6 @@ function blueNoiseThresholdMap(w: number, h: number, size: number): Float32Array
 }
 
 /**
- * Diagonal-Truchet "maze" field (mirrors truchet_diagonal_field). The int64 hash
- * in Python only feeds an `& 1` parity test, which reduces to a plain XOR of low
- * bits — so no BigInt is needed: slash = ((cx ^ cy ^ seed ^ 1) & 1) === 0.
- */
-function truchetDiagonalField(w: number, h: number, scale: number, seed: number): Float32Array {
-  if (scale < 2) scale = 2;
-  const out = new Float32Array(w * h);
-  const half = scale / 2;
-  const inv = 1 / Math.SQRT2;
-  const s = seed | 0;
-  for (let y = 0; y < h; y++) {
-    const cy = Math.floor(y / scale);
-    const v = y % scale;
-    for (let x = 0; x < w; x++) {
-      const cx = Math.floor(x / scale);
-      const u = x % scale;
-      const slash = ((cx ^ cy ^ s ^ 1) & 1) === 0;
-      const dBack = Math.abs(u - v) * inv; // "\"
-      const dFwd = Math.abs(u + v - scale) * inv; // "/"
-      const dist = slash ? dBack : dFwd;
-      let t = dist / half;
-      out[y * w + x] = t < 0 ? 0 : t > 1 ? 1 : t;
-    }
-  }
-  return out;
-}
-
-/**
  * Structure-aware "flow" field (mirrors flow_threshold_map). Uses RAW gray,
  * domain-warped by its own blurred luminance.
  */
@@ -648,7 +618,7 @@ export function dedupePalette(
 }
 
 // ── Top-level render ──────────────────────────────────────────────────────────
-const METHODS: DitherMethod[] = ["bayer", "blue_noise", "floyd_steinberg", "flow", "maze", "flat"];
+const METHODS: DitherMethod[] = ["bayer", "blue_noise", "floyd_steinberg", "flow", "flat"];
 const MODES: PaletteMode[] = ["grayscale", "adaptive", "duotone"];
 
 /**
@@ -661,7 +631,7 @@ export function renderToneDither(raster: Raster, opts: RenderOptions = {}): Rend
   const colors = Math.max(2, Math.min(8, Math.floor(opts.colors ?? 4)));
   const method: DitherMethod = METHODS.includes(opts.method as DitherMethod)
     ? (opts.method as DitherMethod)
-    : "bayer";
+    : "floyd_steinberg";
   const mode: PaletteMode = MODES.includes(opts.palette as PaletteMode)
     ? (opts.palette as PaletteMode)
     : "grayscale";
@@ -690,8 +660,6 @@ export function renderToneDither(raster: Raster, opts: RenderOptions = {}): Rend
     let mask: Float32Array | null;
     if (method === "flat") {
       mask = null;
-    } else if (method === "maze") {
-      mask = truchetDiagonalField(w, h, p.maskScale ?? 5, seed);
     } else if (method === "flow") {
       mask = flowThresholdMap(
         gray,
