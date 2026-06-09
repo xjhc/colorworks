@@ -5,12 +5,18 @@ import {
   bayerMatrix,
   ditherToPalette,
   fsToPalette,
+  errorDiffuseToPalette,
+  DIFFUSION_KERNELS,
+  yliluomaToPalette,
   flowThresholdMap,
   dedupePalette,
   renderToneDither,
   rasterToRgb01,
   rasterToGray,
   applyTone,
+  srgbToOklab,
+  oklabToRgb,
+  kmeansPalette,
 } from "./colorworks";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -169,6 +175,156 @@ describe("fsToPalette", () => {
   });
 });
 
+// ── 4a. OKLab colour space: roundtrip + perceptual palette extraction ───────────
+describe("OKLab colour", () => {
+  it("round-trips sRGB → OKLab → sRGB within rounding", () => {
+    const samples: RGB[] = [
+      [0, 0, 0],
+      [255, 255, 255],
+      [128, 64, 200],
+      [220, 30, 30],
+      [30, 180, 180],
+      [17, 99, 240],
+    ];
+    for (const c of samples) {
+      const [L, a, b] = srgbToOklab(c);
+      const back = oklabToRgb(L, a, b);
+      for (let k = 0; k < 3; k++) expect(Math.abs(back[k] - c[k])).toBeLessThanOrEqual(2);
+    }
+    // OKLab L is monotonic in luma: black darkest, white lightest.
+    expect(srgbToOklab([0, 0, 0])[0]).toBeLessThan(srgbToOklab([128, 128, 128])[0]);
+    expect(srgbToOklab([128, 128, 128])[0]).toBeLessThan(srgbToOklab([255, 255, 255])[0]);
+  });
+
+  it("extracts a perceptually distinct palette from a bicolour image", () => {
+    // Half saturated red, half saturated teal — two clearly distinct hues.
+    const w = 40;
+    const h = 40;
+    const raster = makeRaster(w, h, (x) => (x < w / 2 ? [220, 30, 30] : [30, 180, 180]));
+    const pal = kmeansPalette(raster, 2, 42);
+    expect(pal.length).toBe(2);
+    // The two swatches must be far apart perceptually (not two near-identical reds).
+    const [l0, a0, b0] = srgbToOklab(pal[0]);
+    const [l1, a1, b1] = srgbToOklab(pal[1]);
+    const dist = Math.hypot(l0 - l1, a0 - a1, b0 - b1);
+    expect(dist).toBeGreaterThan(0.1);
+    // Each input colour should be close to one of the recovered swatches.
+    const near = (c: RGB) => {
+      const [L, a, b] = srgbToOklab(c);
+      return Math.min(
+        Math.hypot(L - l0, a - a0, b - b0),
+        Math.hypot(L - l1, a - a1, b - b1),
+      );
+    };
+    expect(near([220, 30, 30])).toBeLessThan(0.06);
+    expect(near([30, 180, 180])).toBeLessThan(0.06);
+  });
+
+  it("kmeansPalette is deterministic and returns luma-sorted swatches", () => {
+    const raster = makeRaster(50, 50, (x, y) => [(x * 5) % 256, (y * 5) % 256, 128]);
+    const a = kmeansPalette(raster, 6, 7);
+    const b = kmeansPalette(raster, 6, 7);
+    expect(a).toEqual(b);
+    for (let i = 1; i < a.length; i++) expect(luma(a[i])).toBeGreaterThanOrEqual(luma(a[i - 1]));
+  });
+});
+
+// ── 4b. Error-diffusion kernel pack stays in-palette; conserving kernels track tone
+describe("error-diffusion kernel pack", () => {
+  const w = 64;
+  const h = 16;
+  const raster = grayGradient(w, h);
+  const palette: RGB[] = [
+    [0, 0, 0],
+    [85, 85, 85],
+    [170, 170, 170],
+    [255, 255, 255],
+  ];
+  const rgb01 = rasterToRgb01(raster);
+
+  for (const method of Object.keys(DIFFUSION_KERNELS)) {
+    it(`${method} stays in-palette and uses multiple levels`, () => {
+      const idx = errorDiffuseToPalette(rgb01, w, h, palette, DIFFUSION_KERNELS[method]);
+      for (const v of idx) {
+        expect(v).toBeGreaterThanOrEqual(0);
+        expect(v).toBeLessThan(palette.length);
+      }
+      expect(new Set(idx).size).toBeGreaterThan(1); // not a degenerate flat fill
+    });
+  }
+
+  it("error-conserving kernels track mean tone (Atkinson is allowed to drift)", () => {
+    const gray = rasterToGray(raster);
+    let meanIn = 0;
+    for (const g of gray) meanIn += g * 255;
+    meanIn /= gray.length;
+
+    // Atkinson under-diffuses (6/8) by design, so it's excluded from the tone check.
+    for (const m of ["floyd_steinberg", "jarvis", "stucki", "burkes", "sierra"]) {
+      const idx = errorDiffuseToPalette(rgb01, w, h, palette, DIFFUSION_KERNELS[m]);
+      let meanOut = 0;
+      for (const v of idx) meanOut += luma(palette[v]);
+      meanOut /= idx.length;
+      expect(Math.abs(meanOut - meanIn)).toBeLessThan(8);
+    }
+  });
+
+  it("fsToPalette equals the floyd_steinberg kernel via the generic engine", () => {
+    const a = fsToPalette(rgb01, w, h, palette);
+    const b = errorDiffuseToPalette(rgb01, w, h, palette, DIFFUSION_KERNELS.floyd_steinberg);
+    expect(Array.from(a)).toEqual(Array.from(b));
+  });
+});
+
+// ── 4c. Yliluoma mixes a fixed palette to approximate out-of-palette colours ────
+describe("yliluoma positional dithering", () => {
+  // sRGB→linear at the same gamma the renderer uses.
+  const toLinear = (c: number) => Math.pow(c / 255, 2.2);
+
+  it("mixes BOTH colours of a 2-colour palette to hit a midtone", () => {
+    const w = 16;
+    const h = 16;
+    const raster = makeRaster(w, h, () => [128, 128, 128]); // flat mid-gray
+    const res = renderToneDither(raster, {
+      colors: 2,
+      palette: "grayscale",
+      method: "yliluoma",
+      seed: 1,
+    });
+    // grayscale 2-colour palette is [black, white] — mixing must use both.
+    expect(new Set(res.indices).size).toBe(2);
+
+    // Gamma-correct mixing matches the target in LINEAR light (the white
+    // fraction ≈ target's linear value), not in gamma space.
+    let meanLin = 0;
+    for (const v of res.indices) meanLin += toLinear(luma(res.palette[v]));
+    meanLin /= res.indices.length;
+    expect(Math.abs(meanLin - toLinear(128))).toBeLessThan(0.06);
+  });
+
+  it("snaps to nearest when the colour is already in the palette", () => {
+    const w = 8;
+    const h = 8;
+    const raster = makeRaster(w, h, () => [0, 0, 0]); // pure black, in-palette
+    const palette: RGB[] = [
+      [0, 0, 0],
+      [255, 255, 255],
+    ];
+    const idx = yliluomaToPalette(rasterToRgb01(raster), w, h, palette, 8);
+    for (const v of idx) expect(v).toBe(0); // all black, no spurious mixing
+  });
+
+  it("stays in-palette and is deterministic", () => {
+    const w = 24;
+    const h = 18;
+    const raster = makeRaster(w, h, (x, y) => [(x * 9) % 256, (y * 11) % 256, (x * y) % 256]);
+    const a = renderToneDither(raster, { colors: 4, palette: "adaptive", method: "yliluoma", seed: 5 });
+    const b = renderToneDither(raster, { colors: 4, palette: "adaptive", method: "yliluoma", seed: 5 });
+    for (const v of a.indices) expect(v).toBeLessThan(a.palette.length);
+    expect(Array.from(a.indices)).toEqual(Array.from(b.indices));
+  });
+});
+
 // ── 5. Flow mask uses raw gray; palette assignment uses toned RGB ───────────────
 describe("renderToneDither flow split", () => {
   it("computes the flow mask from RAW gray and assigns from TONED rgb", () => {
@@ -219,7 +375,12 @@ describe("renderToneDither", () => {
     const h = 30;
     const raster = makeRaster(w, h, (x, y) => [(x * 6) % 256, (y * 8) % 256, (x * y) % 256]);
 
-    for (const method of ["bayer", "blue_noise", "floyd_steinberg", "flow", "flat"] as const) {
+    const methods = [
+      "bayer", "blue_noise", "floyd_steinberg",
+      "atkinson", "jarvis", "stucki", "burkes", "sierra",
+      "yliluoma", "flow", "flat",
+    ] as const;
+    for (const method of methods) {
       const res = renderToneDither(raster, { colors: 5, palette: "adaptive", method, seed: 42 });
       expect(res.indices.length).toBe(w * h);
       expect(res.width).toBe(w);

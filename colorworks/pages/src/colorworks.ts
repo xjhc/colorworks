@@ -11,12 +11,17 @@
  *     deduped, luma-sorted palette. The UI paints indices → palette, which makes
  *     live palette-recolour a repaint (no re-dither).
  *
- * Fidelity notes vs. Python:
- *   - Adaptive palette is deterministic k-means++ on a ≤96px subsample, sorted by
- *     luma. The PRNG is a seeded mulberry32, so results are deterministic but NOT
- *     bit-identical to NumPy's PCG64 (visual parity, by design).
- *   - Floyd–Steinberg is a fresh colour-space implementation (no PIL): in-palette
- *     output that tracks mean tone, not PIL median-cut parity.
+ * Colour fidelity:
+ *   - All palette generation and colour matching happen in OKLab, a near-
+ *     perceptually-uniform space. "Nearest colour" therefore means *perceptually*
+ *     nearest, not sRGB-Euclidean nearest (which over-weights green and mis-ranks
+ *     dark colours) — the single biggest lever on colour quality with a small
+ *     palette.
+ *   - Adaptive palette is deterministic median-cut (perceptual variance splitting)
+ *     refined by k-means, both in OKLab, on a ≤96px subsample, sorted by luma.
+ *   - Error diffusion (Floyd–Steinberg & the kernel pack) chooses the perceptually
+ *     nearest swatch in OKLab but diffuses the residual in sRGB, so total tone is
+ *     conserved like the Python original (no PIL median-cut parity).
  *   - Flow uses the RAW grayscale for its threshold mask and the tone-remapped RGB
  *     for palette assignment — matching the Python split.
  */
@@ -28,6 +33,12 @@ export type DitherMethod =
   | "bayer"
   | "blue_noise"
   | "floyd_steinberg"
+  | "atkinson"
+  | "jarvis"
+  | "stucki"
+  | "burkes"
+  | "sierra"
+  | "yliluoma"
   | "flow"
   | "flat";
 
@@ -100,16 +111,63 @@ function lerpRgb(a: RGB, b: RGB, t: number): RGB {
   ];
 }
 
-// ── Deterministic PRNG (mulberry32) ───────────────────────────────────────────
-function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+// ── OKLab perceptual colour space ──────────────────────────────────────────────
+// sRGB↔OKLab (Björn Ottosson). Matching and clustering happen here so distances
+// are perceptual. sRGB-Euclidean over-weights green and mis-ranks dark colours;
+// OKLab is near-uniform, so the nearest swatch is the one the eye agrees with.
+const srgbToLinearChannel = (c: number): number =>
+  c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+const linearToSrgbChannel = (c: number): number =>
+  c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+
+/** sRGB (0..1) → OKLab [L, a, b] written into `out` at offset `o`. */
+function srgbToOklabInto(r: number, g: number, b: number, out: Float32Array, o: number): void {
+  const lr = srgbToLinearChannel(r);
+  const lg = srgbToLinearChannel(g);
+  const lb = srgbToLinearChannel(b);
+  const l = 0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb;
+  const m = 0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb;
+  const s = 0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb;
+  const l_ = Math.cbrt(l);
+  const m_ = Math.cbrt(m);
+  const s_ = Math.cbrt(s);
+  out[o] = 0.2104542553 * l_ + 0.793617785 * m_ - 0.0040720468 * s_;
+  out[o + 1] = 1.9779984951 * l_ - 2.428592205 * m_ + 0.4505937099 * s_;
+  out[o + 2] = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.808675766 * s_;
+}
+
+/** sRGB RGB (0..255) → OKLab [L, a, b]. */
+export function srgbToOklab([r, g, b]: RGB): [number, number, number] {
+  const out = new Float32Array(3);
+  srgbToOklabInto(r / 255, g / 255, b / 255, out, 0);
+  return [out[0], out[1], out[2]];
+}
+
+/** OKLab [L, a, b] → sRGB RGB (0..255, gamut-clamped). */
+export function oklabToRgb(L: number, A: number, B: number): RGB {
+  const l_ = L + 0.3963377774 * A + 0.2158037573 * B;
+  const m_ = L - 0.1055613458 * A - 0.0638541728 * B;
+  const s_ = L - 0.0894841775 * A - 1.291485548 * B;
+  const l = l_ * l_ * l_;
+  const m = m_ * m_ * m_;
+  const s = s_ * s_ * s_;
+  const r = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
+  const g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
+  const b = -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s;
+  return [
+    clampByte(linearToSrgbChannel(r) * 255),
+    clampByte(linearToSrgbChannel(g) * 255),
+    clampByte(linearToSrgbChannel(b) * 255),
+  ];
+}
+
+/** Pack a palette (RGB 0..255) into a flat OKLab Float32Array (length n*3). */
+function paletteToOklab(palette: RGB[]): Float32Array {
+  const out = new Float32Array(palette.length * 3);
+  for (let j = 0; j < palette.length; j++) {
+    srgbToOklabInto(palette[j][0] / 255, palette[j][1] / 255, palette[j][2] / 255, out, j * 3);
+  }
+  return out;
 }
 
 // ── Raster → float buffers ────────────────────────────────────────────────────
@@ -200,91 +258,123 @@ function gaussianBlur(src: Float32Array, w: number, h: number, sigma: number): F
 
 // ── Palettes ──────────────────────────────────────────────────────────────────
 /**
- * k-means++ palette extraction on a ≤96px subsample (mirrors kmeans_palette).
- * Works in 0..255 space like the Python original. Deterministic given `seed`.
+ * Adaptive palette extraction in OKLab on a ≤96px subsample. Seeds with
+ * perceptual median-cut (split the box with the largest sum-of-squared-error
+ * along its highest-variance axis at the median), then refines with k-means —
+ * the ubitux-recommended pipeline. Working in OKLab keeps the swatches
+ * perceptually balanced (median-cut alone in RGB spends slots on near-identical
+ * dominant colours and desaturates), and the k-means pass closes median-cut's
+ * residual gap. Deterministic; `seed` is retained for API compatibility but no
+ * longer affects the result (the method is RNG-free).
+ *
+ * Name kept as `kmeansPalette` for callers (`buildTonePalette`, `repixel`).
  */
 export function kmeansPalette(raster: Raster, colors: number, seed = 0, iters = 16): RGB[] {
+  void seed;
   colors = Math.max(2, Math.floor(colors));
   const { width: w, height: h, data } = raster;
 
-  // Subsample to a max dimension of 96 (nearest-neighbour, DOM-free).
+  // Subsample to a max dimension of 96 (nearest-neighbour, DOM-free), → OKLab.
   const maxDim = Math.max(w, h);
   const s = maxDim > 96 ? 96 / maxDim : 1;
   const sw = Math.max(1, Math.round(w * s));
   const sh = Math.max(1, Math.round(h * s));
   const m = sw * sh;
-  const X = new Float32Array(m * 3);
+  if (m === 0) return buildTonePalette(raster, colors, "grayscale");
+
+  const P = new Float32Array(m * 3); // OKLab points
   for (let ty = 0; ty < sh; ty++) {
     const syRow = Math.min(h - 1, Math.floor(ty / s)) * w;
     for (let tx = 0; tx < sw; tx++) {
       const sx = Math.min(w - 1, Math.floor(tx / s));
       const src = (syRow + sx) * 4;
-      const dst = (ty * sw + tx) * 3;
-      X[dst] = data[src];
-      X[dst + 1] = data[src + 1];
-      X[dst + 2] = data[src + 2];
+      srgbToOklabInto(data[src] / 255, data[src + 1] / 255, data[src + 2] / 255, P, (ty * sw + tx) * 3);
     }
   }
-  if (m === 0) return buildTonePalette(raster, colors, "grayscale");
 
-  const rng = mulberry32(seed);
-  const randInt = (n: number) => Math.min(n - 1, Math.floor(rng() * n));
-
-  const sqDist = (i: number, cr: number, cg: number, cb: number): number => {
-    const dr = X[i * 3] - cr;
-    const dg = X[i * 3 + 1] - cg;
-    const db = X[i * 3 + 2] - cb;
-    return dr * dr + dg * dg + db * db;
+  // Mean + per-axis variance (×count = SSE) of the point slice idx[lo, hi).
+  const idx = new Int32Array(m);
+  for (let i = 0; i < m; i++) idx[i] = i;
+  const stats = (lo: number, hi: number) => {
+    let mL = 0;
+    let mA = 0;
+    let mB = 0;
+    for (let i = lo; i < hi; i++) {
+      const p = idx[i] * 3;
+      mL += P[p];
+      mA += P[p + 1];
+      mB += P[p + 2];
+    }
+    const cnt = hi - lo;
+    mL /= cnt;
+    mA /= cnt;
+    mB /= cnt;
+    let vL = 0;
+    let vA = 0;
+    let vB = 0;
+    for (let i = lo; i < hi; i++) {
+      const p = idx[i] * 3;
+      const dL = P[p] - mL;
+      const dA = P[p + 1] - mA;
+      const dB = P[p + 2] - mB;
+      vL += dL * dL;
+      vA += dA * dA;
+      vB += dB * dB;
+    }
+    return { mL, mA, mB, vL, vA, vB, sse: vL + vA + vB };
   };
 
-  // k-means++ seeding.
-  const C = new Float32Array(colors * 3);
-  {
-    const f = randInt(m);
-    C[0] = X[f * 3];
-    C[1] = X[f * 3 + 1];
-    C[2] = X[f * 3 + 2];
-  }
-  const d2 = new Float32Array(m);
-  for (let c = 1; c < colors; c++) {
-    let total = 0;
-    for (let i = 0; i < m; i++) {
-      let best = Infinity;
-      for (let j = 0; j < c; j++) {
-        const dd = sqDist(i, C[j * 3], C[j * 3 + 1], C[j * 3 + 2]);
-        if (dd < best) best = dd;
+  // ── Median-cut seeding (perceptual variance splitting) ──────────────────────
+  const boxes: Array<{ lo: number; hi: number }> = [{ lo: 0, hi: m }];
+  while (boxes.length < colors) {
+    let bi = -1;
+    let bestSse = -1;
+    for (let b = 0; b < boxes.length; b++) {
+      if (boxes[b].hi - boxes[b].lo <= 1) continue;
+      const sse = stats(boxes[b].lo, boxes[b].hi).sse;
+      if (sse > bestSse) {
+        bestSse = sse;
+        bi = b;
       }
-      d2[i] = best;
-      total += best;
     }
-    let pick = m - 1;
-    if (total > 1e-9) {
-      let target = rng() * total;
-      for (let i = 0; i < m; i++) {
-        target -= d2[i];
-        if (target <= 0) {
-          pick = i;
-          break;
-        }
-      }
-    } else {
-      pick = randInt(m);
-    }
-    C[c * 3] = X[pick * 3];
-    C[c * 3 + 1] = X[pick * 3 + 1];
-    C[c * 3 + 2] = X[pick * 3 + 2];
+    if (bi < 0) break; // every box is a single point — can't split further
+    const box = boxes[bi];
+    const st = stats(box.lo, box.hi);
+    const axis = st.vL >= st.vA && st.vL >= st.vB ? 0 : st.vA >= st.vB ? 1 : 2;
+    const slice = Array.from(idx.subarray(box.lo, box.hi));
+    slice.sort((p, q) => P[p * 3 + axis] - P[q * 3 + axis]);
+    for (let i = 0; i < slice.length; i++) idx[box.lo + i] = slice[i];
+    const mid = box.lo + (slice.length >> 1);
+    boxes[bi] = { lo: box.lo, hi: mid };
+    boxes.push({ lo: mid, hi: box.hi });
   }
 
-  // Lloyd iterations.
+  const k = boxes.length;
+  const C = new Float32Array(k * 3);
+  for (let b = 0; b < k; b++) {
+    const st = stats(boxes[b].lo, boxes[b].hi);
+    C[b * 3] = st.mL;
+    C[b * 3 + 1] = st.mA;
+    C[b * 3 + 2] = st.mB;
+  }
+
+  // ── k-means refinement (Lloyd iterations in OKLab) ──────────────────────────
+  const sq = (i: number, cL: number, cA: number, cB: number): number => {
+    const p = i * 3;
+    const dL = P[p] - cL;
+    const dA = P[p + 1] - cA;
+    const dB = P[p + 2] - cB;
+    return dL * dL + dA * dA + dB * dB;
+  };
   const labels = new Int32Array(m);
-  const sums = new Float64Array(colors * 3);
-  const counts = new Int32Array(colors);
+  const sums = new Float64Array(k * 3);
+  const counts = new Int32Array(k);
   for (let it = 0; it < iters; it++) {
     for (let i = 0; i < m; i++) {
       let best = Infinity;
       let bj = 0;
-      for (let j = 0; j < colors; j++) {
-        const dd = sqDist(i, C[j * 3], C[j * 3 + 1], C[j * 3 + 2]);
+      for (let j = 0; j < k; j++) {
+        const dd = sq(i, C[j * 3], C[j * 3 + 1], C[j * 3 + 2]);
         if (dd < best) {
           best = dd;
           bj = j;
@@ -297,23 +387,23 @@ export function kmeansPalette(raster: Raster, colors: number, seed = 0, iters = 
     for (let i = 0; i < m; i++) {
       const j = labels[i];
       counts[j]++;
-      sums[j * 3] += X[i * 3];
-      sums[j * 3 + 1] += X[i * 3 + 1];
-      sums[j * 3 + 2] += X[i * 3 + 2];
+      sums[j * 3] += P[i * 3];
+      sums[j * 3 + 1] += P[i * 3 + 1];
+      sums[j * 3 + 2] += P[i * 3 + 2];
     }
-    for (let j = 0; j < colors; j++) {
+    for (let j = 0; j < k; j++) {
       if (counts[j] > 0) {
         C[j * 3] = sums[j * 3] / counts[j];
         C[j * 3 + 1] = sums[j * 3 + 1] / counts[j];
         C[j * 3 + 2] = sums[j * 3 + 2] / counts[j];
       } else {
-        // Re-seed a dead cluster on the worst-fit pixel.
+        // Re-seed a dead cluster on the worst-fit point.
         let far = 0;
         let worst = -1;
         for (let i = 0; i < m; i++) {
           let best = Infinity;
-          for (let k = 0; k < colors; k++) {
-            const dd = sqDist(i, C[k * 3], C[k * 3 + 1], C[k * 3 + 2]);
+          for (let q = 0; q < k; q++) {
+            const dd = sq(i, C[q * 3], C[q * 3 + 1], C[q * 3 + 2]);
             if (dd < best) best = dd;
           }
           if (best > worst) {
@@ -321,21 +411,15 @@ export function kmeansPalette(raster: Raster, colors: number, seed = 0, iters = 
             far = i;
           }
         }
-        C[j * 3] = X[far * 3];
-        C[j * 3 + 1] = X[far * 3 + 1];
-        C[j * 3 + 2] = X[far * 3 + 2];
+        C[j * 3] = P[far * 3];
+        C[j * 3 + 1] = P[far * 3 + 1];
+        C[j * 3 + 2] = P[far * 3 + 2];
       }
     }
   }
 
   const swatches: RGB[] = [];
-  for (let j = 0; j < colors; j++) {
-    swatches.push([
-      Math.round(C[j * 3]),
-      Math.round(C[j * 3 + 1]),
-      Math.round(C[j * 3 + 2]),
-    ]);
-  }
+  for (let j = 0; j < k; j++) swatches.push(oklabToRgb(C[j * 3], C[j * 3 + 1], C[j * 3 + 2]));
   swatches.sort((a, b) => luma(a[0], a[1], a[2]) - luma(b[0], b[1], b[2]));
   return swatches.slice(0, colors);
 }
@@ -464,13 +548,13 @@ export function flowThresholdMap(
   return out;
 }
 
-// ── Dither to palette (colour space) ──────────────────────────────────────────
+// ── Dither to palette (perceptual / OKLab) ─────────────────────────────────────
 /**
- * Dither `rgb01` to `palette` in colour space (mirrors dither_to_palette).
- * For each pixel: find the two nearest palette colours; with a mask, blend
- * between them by how far the pixel lies toward the second. With `mask=null`
- * this is plain nearest-colour assignment (the flat-poster path). Returns
- * per-pixel palette indices.
+ * Dither `rgb01` to `palette` in OKLab (mirrors dither_to_palette, now
+ * perceptual). For each pixel: find the two perceptually nearest palette
+ * colours; with a mask, blend between them by how far the pixel projects toward
+ * the second along the OKLab line joining them. With `mask=null` this is plain
+ * nearest-colour assignment (the flat-poster path). Returns per-pixel indices.
  */
 export function ditherToPalette(
   rgb01: Float32Array,
@@ -480,17 +564,14 @@ export function ditherToPalette(
   mask: Float32Array | null,
 ): Uint16Array {
   const n = palette.length;
-  const pal = new Float32Array(n * 3);
-  for (let j = 0; j < n; j++) {
-    pal[j * 3] = palette[j][0] / 255;
-    pal[j * 3 + 1] = palette[j][1] / 255;
-    pal[j * 3 + 2] = palette[j][2] / 255;
-  }
+  const pal = paletteToOklab(palette); // OKLab palette coords
+  const lab = new Float32Array(3);
   const out = new Uint16Array(w * h);
   for (let i = 0; i < w * h; i++) {
-    const r = rgb01[i * 3];
-    const g = rgb01[i * 3 + 1];
-    const b = rgb01[i * 3 + 2];
+    srgbToOklabInto(rgb01[i * 3], rgb01[i * 3 + 1], rgb01[i * 3 + 2], lab, 0);
+    const r = lab[0]; // L, a, b in OKLab (names kept for diff minimalism)
+    const g = lab[1];
+    const b = lab[2];
     // two nearest palette colours
     let i0 = 0;
     let i1 = 0;
@@ -529,31 +610,95 @@ export function ditherToPalette(
   return out;
 }
 
+// ── Error-diffusion kernels ─────────────────────────────────────────────────
 /**
- * Floyd–Steinberg error diffusion onto `palette` in colour space (a fresh port,
- * since PIL is unavailable). Output is guaranteed in-palette. Returns indices.
+ * A forward-only error-diffusion kernel: a list of [dx, dy, weight] neighbours
+ * (dy>0, or dy===0 && dx>0 — error never flows backward over the raster scan)
+ * plus the divisor the weights are normalised by. Each named kernel is a
+ * different "diffusion character" — the family of looks beyond plain
+ * Floyd–Steinberg (smoother, sharper, or sparser grain).
  */
-export function fsToPalette(
+export interface DiffusionKernel {
+  divisor: number;
+  cells: ReadonlyArray<readonly [number, number, number]>;
+}
+
+/**
+ * The diffusion-kernel pack. Coefficients are the canonical published matrices.
+ * `floyd_steinberg` lives here too so every error-diffused method shares one
+ * engine. Note `atkinson` only diffuses 6/8 of the error (divisor 8, weights
+ * sum to 6) — that under-diffusion is *the* source of its crisp, high-contrast
+ * 1-bit Macintosh look; the others conserve the full error.
+ */
+export const DIFFUSION_KERNELS: Record<string, DiffusionKernel> = {
+  floyd_steinberg: {
+    divisor: 16,
+    cells: [[1, 0, 7], [-1, 1, 3], [0, 1, 5], [1, 1, 1]],
+  },
+  atkinson: {
+    divisor: 8,
+    cells: [[1, 0, 1], [2, 0, 1], [-1, 1, 1], [0, 1, 1], [1, 1, 1], [0, 2, 1]],
+  },
+  jarvis: {
+    divisor: 48,
+    cells: [
+      [1, 0, 7], [2, 0, 5],
+      [-2, 1, 3], [-1, 1, 5], [0, 1, 7], [1, 1, 5], [2, 1, 3],
+      [-2, 2, 1], [-1, 2, 3], [0, 2, 5], [1, 2, 3], [2, 2, 1],
+    ],
+  },
+  stucki: {
+    divisor: 42,
+    cells: [
+      [1, 0, 8], [2, 0, 4],
+      [-2, 1, 2], [-1, 1, 4], [0, 1, 8], [1, 1, 4], [2, 1, 2],
+      [-2, 2, 1], [-1, 2, 2], [0, 2, 4], [1, 2, 2], [2, 2, 1],
+    ],
+  },
+  burkes: {
+    divisor: 32,
+    cells: [
+      [1, 0, 8], [2, 0, 4],
+      [-2, 1, 2], [-1, 1, 4], [0, 1, 8], [1, 1, 4], [2, 1, 2],
+    ],
+  },
+  sierra: {
+    divisor: 32,
+    cells: [
+      [1, 0, 5], [2, 0, 3],
+      [-2, 1, 2], [-1, 1, 4], [0, 1, 5], [1, 1, 4], [2, 1, 2],
+      [-1, 2, 2], [0, 2, 3], [1, 2, 2],
+    ],
+  },
+};
+
+/**
+ * Error diffusion onto `palette` using an arbitrary `kernel`. The nearest-colour
+ * decision is made *perceptually* (in OKLab), but the residual error is diffused
+ * in sRGB — so the choice tracks the eye while total tone stays conserved (the
+ * sRGB mean is preserved, matching the Python original). Output is guaranteed
+ * in-palette. Returns per-pixel palette indices.
+ */
+export function errorDiffuseToPalette(
   rgb01: Float32Array,
   w: number,
   h: number,
   palette: RGB[],
+  kernel: DiffusionKernel,
 ): Uint16Array {
   const n = palette.length;
-  const pal = new Float32Array(n * 3);
+  const pal = new Float32Array(n * 3); // sRGB 0..1 (for the diffused residual)
   for (let j = 0; j < n; j++) {
     pal[j * 3] = palette[j][0] / 255;
     pal[j * 3 + 1] = palette[j][1] / 255;
     pal[j * 3 + 2] = palette[j][2] / 255;
   }
-  const buf = Float32Array.from(rgb01); // mutable working copy
+  const palLab = paletteToOklab(palette); // OKLab (for the perceptual decision)
+  const buf = Float32Array.from(rgb01); // mutable sRGB working copy
   const out = new Uint16Array(w * h);
-
-  const diffuse = (idx: number, er: number, eg: number, eb: number, f: number) => {
-    buf[idx * 3] += er * f;
-    buf[idx * 3 + 1] += eg * f;
-    buf[idx * 3 + 2] += eb * f;
-  };
+  const lab = new Float32Array(3);
+  const cells = kernel.cells;
+  const inv = 1 / kernel.divisor;
 
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
@@ -561,28 +706,198 @@ export function fsToPalette(
       const r = buf[i * 3];
       const g = buf[i * 3 + 1];
       const b = buf[i * 3 + 2];
+      // Decide the nearest swatch in OKLab (clamp the error-adjusted value into
+      // gamut first so the conversion is well-defined).
+      srgbToOklabInto(
+        r < 0 ? 0 : r > 1 ? 1 : r,
+        g < 0 ? 0 : g > 1 ? 1 : g,
+        b < 0 ? 0 : b > 1 ? 1 : b,
+        lab,
+        0,
+      );
       let bj = 0;
       let best = Infinity;
       for (let j = 0; j < n; j++) {
-        const dr = r - pal[j * 3];
-        const dg = g - pal[j * 3 + 1];
-        const db = b - pal[j * 3 + 2];
-        const dd = dr * dr + dg * dg + db * db;
+        const dL = lab[0] - palLab[j * 3];
+        const dA = lab[1] - palLab[j * 3 + 1];
+        const dB = lab[2] - palLab[j * 3 + 2];
+        const dd = dL * dL + dA * dA + dB * dB;
         if (dd < best) {
           best = dd;
           bj = j;
         }
       }
       out[i] = bj;
+      // Diffuse the residual in sRGB (tone-conserving).
       const er = r - pal[bj * 3];
       const eg = g - pal[bj * 3 + 1];
       const eb = b - pal[bj * 3 + 2];
-      if (x + 1 < w) diffuse(i + 1, er, eg, eb, 7 / 16);
-      if (y + 1 < h) {
-        if (x > 0) diffuse(i + w - 1, er, eg, eb, 3 / 16);
-        diffuse(i + w, er, eg, eb, 5 / 16);
-        if (x + 1 < w) diffuse(i + w + 1, er, eg, eb, 1 / 16);
+      for (let c = 0; c < cells.length; c++) {
+        const nx = x + cells[c][0];
+        const ny = y + cells[c][1];
+        if (nx < 0 || nx >= w || ny >= h) continue;
+        const f = cells[c][2] * inv;
+        const ni = (ny * w + nx) * 3;
+        buf[ni] += er * f;
+        buf[ni + 1] += eg * f;
+        buf[ni + 2] += eb * f;
       }
+    }
+  }
+  return out;
+}
+
+/**
+ * Floyd–Steinberg error diffusion — kept as a named wrapper over the generic
+ * engine (the FS kernel) for callers and tests that target it directly.
+ */
+export function fsToPalette(
+  rgb01: Float32Array,
+  w: number,
+  h: number,
+  palette: RGB[],
+): Uint16Array {
+  return errorDiffuseToPalette(rgb01, w, h, palette, DIFFUSION_KERNELS.floyd_steinberg);
+}
+
+// ── Yliluoma positional dithering (gamma-correct palette mixing) ──────────────
+/**
+ * Joel Yliluoma's arbitrary-palette positional dithering (algorithm 2, the
+ * Knoll-style variant), gamma-corrected. Unlike ordered/Bayer dithering — which
+ * snaps each pixel to one of its two nearest palette colours — this builds a
+ * per-colour "mixing plan": the set of palette entries whose *linear-light
+ * average* best approximates the true colour. A Bayer index then selects which
+ * plan entry shows at each pixel. The payoff: a small *fixed* palette can
+ * reproduce colours that aren't in it (it mixes them spatially), so 4–8 colours
+ * go a remarkably long way. Mixing happens in linear light (gamma 2.2), which is
+ * the physically correct way to blend — so midtones are intentionally darker in
+ * gamma space than the sRGB-space error-diffusion methods (that is the "correct
+ * colour" the algorithm is named for).
+ */
+const YLILUOMA_GAMMA = 2.2;
+
+/** sRGB byte (0..255) → linear (0..1), precomputed. */
+const SRGB_TO_LINEAR: Float32Array = (() => {
+  const lut = new Float32Array(256);
+  for (let i = 0; i < 256; i++) lut[i] = Math.pow(i / 255, YLILUOMA_GAMMA);
+  return lut;
+})();
+
+/** linear (0..1) → sRGB value (0..255). */
+function linearToSrgb(l: number): number {
+  const v = l <= 0 ? 0 : l >= 1 ? 1 : Math.pow(l, 1 / YLILUOMA_GAMMA);
+  return v * 255;
+}
+
+/**
+ * Luminance-weighted perceptual colour distance in gamma space (Yliluoma's
+ * `ColorCompare`): the luma term dominates, chroma is down-weighted ×0.75. This
+ * is what stops the mixer pairing colours with jarringly different brightness.
+ */
+function colorCompare(
+  r1: number, g1: number, b1: number,
+  r2: number, g2: number, b2: number,
+): number {
+  const luma1 = (r1 * 299 + g1 * 587 + b1 * 114) / 255000;
+  const luma2 = (r2 * 299 + g2 * 587 + b2 * 114) / 255000;
+  const dl = luma1 - luma2;
+  const dr = (r1 - r2) / 255;
+  const dg = (g1 - g2) / 255;
+  const db = (b1 - b2) / 255;
+  return (dr * dr * 0.299 + dg * dg * 0.587 + db * db * 0.114) * 0.75 + dl * dl;
+}
+
+/**
+ * Build a mixing plan of `mixSize` palette indices whose linear average best
+ * approximates the gamma-space target colour, greedily (add the colour that
+ * most improves the running average each step), then sort by luma so the Bayer
+ * index walks the plan dark→light.
+ */
+function deviseMixingPlan(
+  tr: number, tg: number, tb: number,
+  palGamma: Float32Array,
+  palLinear: Float32Array,
+  n: number,
+  mixSize: number,
+): Uint16Array {
+  const plan = new Uint16Array(mixSize);
+  let sr = 0;
+  let sg = 0;
+  let sb = 0;
+  for (let k = 0; k < mixSize; k++) {
+    const t = k + 1;
+    let best = 0;
+    let bestPenalty = Infinity;
+    for (let j = 0; j < n; j++) {
+      const ar = linearToSrgb((sr + palLinear[j * 3]) / t);
+      const ag = linearToSrgb((sg + palLinear[j * 3 + 1]) / t);
+      const ab = linearToSrgb((sb + palLinear[j * 3 + 2]) / t);
+      const penalty = colorCompare(tr, tg, tb, ar, ag, ab);
+      if (penalty < bestPenalty) {
+        bestPenalty = penalty;
+        best = j;
+      }
+    }
+    plan[k] = best;
+    sr += palLinear[best * 3];
+    sg += palLinear[best * 3 + 1];
+    sb += palLinear[best * 3 + 2];
+  }
+  const lumaOf = (j: number) =>
+    palGamma[j * 3] * 299 + palGamma[j * 3 + 1] * 587 + palGamma[j * 3 + 2] * 114;
+  return Uint16Array.from(Array.from(plan).sort((a, b) => lumaOf(a) - lumaOf(b)));
+}
+
+/**
+ * Render `rgb01` against `palette` with Yliluoma positional dithering. Mixing
+ * plans are cached per quantised target colour (6 bits/channel), so flat
+ * regions cost one plan. Returns per-pixel palette indices.
+ */
+export function yliluomaToPalette(
+  rgb01: Float32Array,
+  w: number,
+  h: number,
+  palette: RGB[],
+  matrixSize = 8,
+): Uint16Array {
+  const n = palette.length;
+  const palGamma = new Float32Array(n * 3);
+  const palLinear = new Float32Array(n * 3);
+  for (let j = 0; j < n; j++) {
+    const r = clampByte(palette[j][0]);
+    const g = clampByte(palette[j][1]);
+    const b = clampByte(palette[j][2]);
+    palGamma[j * 3] = r;
+    palGamma[j * 3 + 1] = g;
+    palGamma[j * 3 + 2] = b;
+    palLinear[j * 3] = SRGB_TO_LINEAR[r];
+    palLinear[j * 3 + 1] = SRGB_TO_LINEAR[g];
+    palLinear[j * 3 + 2] = SRGB_TO_LINEAR[b];
+  }
+  const ms = [2, 4, 8, 16].includes(matrixSize) ? matrixSize : 8;
+  const mixSize = ms * ms;
+  const bayer = bayerMatrix(ms); // normalized [0,1); ×mixSize ⇒ integer rank
+  const out = new Uint16Array(w * h);
+  const cache = new Map<number, Uint16Array>();
+
+  for (let y = 0; y < h; y++) {
+    const brow = bayer[y % ms];
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const tr = rgb01[i * 3] * 255;
+      const tg = rgb01[i * 3 + 1] * 255;
+      const tb = rgb01[i * 3 + 2] * 255;
+      const qr = clampByte(tr) >> 2;
+      const qg = clampByte(tg) >> 2;
+      const qb = clampByte(tb) >> 2;
+      const key = (qr << 12) | (qg << 6) | qb;
+      let plan = cache.get(key);
+      if (!plan) {
+        plan = deviseMixingPlan(tr, tg, tb, palGamma, palLinear, n, mixSize);
+        cache.set(key, plan);
+      }
+      const rank = Math.min(mixSize - 1, Math.floor(brow[x % ms] * mixSize));
+      out[i] = plan[rank];
     }
   }
   return out;
@@ -618,7 +933,11 @@ export function dedupePalette(
 }
 
 // ── Top-level render ──────────────────────────────────────────────────────────
-const METHODS: DitherMethod[] = ["bayer", "blue_noise", "floyd_steinberg", "flow", "flat"];
+const METHODS: DitherMethod[] = [
+  "bayer", "blue_noise", "floyd_steinberg",
+  "atkinson", "jarvis", "stucki", "burkes", "sierra",
+  "yliluoma", "flow", "flat",
+];
 const MODES: PaletteMode[] = ["grayscale", "adaptive", "duotone"];
 
 /**
@@ -654,8 +973,10 @@ export function renderToneDither(raster: Raster, opts: RenderOptions = {}): Rend
   applyTone(rgb01, gray, contrast, midpoint);
 
   let indices: Uint16Array;
-  if (method === "floyd_steinberg") {
-    indices = fsToPalette(rgb01, w, h, palette);
+  if (method === "yliluoma") {
+    indices = yliluomaToPalette(rgb01, w, h, palette, p.matrixSize ?? 8);
+  } else if (method in DIFFUSION_KERNELS) {
+    indices = errorDiffuseToPalette(rgb01, w, h, palette, DIFFUSION_KERNELS[method]);
   } else {
     let mask: Float32Array | null;
     if (method === "flat") {
