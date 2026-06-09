@@ -63,27 +63,21 @@ export const TONE_DITHER_PARAMS: ParamDef[] = [
     key: "method",
     label: "Dither Method",
     type: "str",
-    default: "bayer",
+    default: "floyd_steinberg",
     group: "pattern",
     options: [
       { value: "bayer", label: "Ordered (Bayer)" },
       { value: "blue_noise", label: "Blue Noise" },
       { value: "floyd_steinberg", label: "Floyd–Steinberg" },
+      { value: "atkinson", label: "Atkinson" },
+      { value: "jarvis", label: "Jarvis–Judice–Ninke" },
+      { value: "stucki", label: "Stucki" },
+      { value: "burkes", label: "Burkes" },
+      { value: "sierra", label: "Sierra" },
+      { value: "yliluoma", label: "Yliluoma (palette mix)" },
       { value: "flow", label: "Flow (waves)" },
-      { value: "maze", label: "Maze (labyrinth)" },
       { value: "flat", label: "Flat poster (no dither)" },
     ],
-  },
-  {
-    key: "mask_scale",
-    label: "Maze Cell Size (px)",
-    type: "float",
-    default: 5,
-    min: 2,
-    max: 24,
-    step: 0.5,
-    group: "pattern",
-    visibleWhen: { param: "method", equals: ["maze"] },
   },
   {
     key: "matrix_size",
@@ -450,7 +444,144 @@ export const REPIXEL_PARAMS: ParamDef[] = [
   },
 ];
 
-export type RendererId = "tone_dither" | "depixelate" | "repixel";
+/** Block mosaic params (mirror of blockmosaic.ts BlockMosaicOptions). */
+export const BLOCK_MOSAIC_PARAMS: ParamDef[] = [
+  {
+    key: "block",
+    label: "Block size",
+    type: "int",
+    default: 2,
+    group: "pattern",
+    options: [
+      { value: 2, label: "2×2" },
+      { value: 3, label: "3×3" },
+      { value: 4, label: "4×4" },
+    ],
+  },
+  {
+    key: "cell",
+    label: "Cell size (px)",
+    type: "int",
+    default: 6,
+    min: 2,
+    max: 16,
+    step: 1,
+    group: "pattern",
+  },
+  {
+    key: "method",
+    label: "Fill mode",
+    type: "str",
+    default: "match",
+    group: "pattern",
+    options: [
+      { value: "match", label: "Match — clean structure" },
+      { value: "diffuse", label: "Diffuse — tonal accuracy" },
+    ],
+  },
+  {
+    key: "library",
+    label: "Block library",
+    type: "str",
+    // Which preset tiles seed the candidate set. "none" leans entirely on the
+    // learned blocks (a pure vector-quantisation mosaic).
+    default: "auto",
+    group: "pattern",
+    options: [
+      { value: "auto", label: "Auto (solids + checkers + diagonals)" },
+      { value: "solids", label: "Solids only" },
+      { value: "checker", label: "Solids + checkers" },
+      { value: "none", label: "Learned only" },
+    ],
+  },
+  {
+    key: "learn",
+    label: "Learned blocks",
+    type: "int",
+    // K data-driven blocks discovered from the image by k-means. 0 = presets only.
+    default: 6,
+    min: 0,
+    max: 16,
+    step: 1,
+    group: "pattern",
+  },
+  {
+    key: "library_bias",
+    label: "Prefer library",
+    type: "float",
+    // 0 = neutral (best block wins); 1 = strongly prefer preset blocks, falling to
+    // a learned block only when it's materially better.
+    default: 0.5,
+    min: 0,
+    max: 1,
+    step: 0.05,
+    group: "pattern",
+  },
+  {
+    key: "palette",
+    label: "Palette",
+    type: "str",
+    default: "adaptive",
+    group: "palette",
+    options: [
+      { value: "adaptive", label: "Adaptive (from image)" },
+      { value: "grayscale", label: "Grayscale" },
+      { value: "duotone", label: "Duotone (ink → paper)" },
+    ],
+  },
+  {
+    key: "colors",
+    label: "Colors",
+    type: "int",
+    default: 4,
+    min: 2,
+    max: 8,
+    step: 1,
+    group: "palette",
+    // Feeds the preset library; irrelevant when running on learned blocks alone.
+    visibleWhen: { param: "library", equals: ["auto", "solids", "checker"] },
+  },
+  {
+    key: "ink_color",
+    label: "Ink Color (duotone)",
+    type: "str",
+    default: "#161616",
+    group: "palette",
+    uiHint: "color",
+    visibleWhen: { param: "palette", equals: ["duotone"] },
+  },
+  {
+    key: "paper_color",
+    label: "Paper Color (duotone)",
+    type: "str",
+    default: "#f4ebd9",
+    group: "palette",
+    uiHint: "color",
+    visibleWhen: { param: "palette", equals: ["duotone"] },
+  },
+  {
+    key: "contrast",
+    label: "Contrast",
+    type: "float",
+    default: 1,
+    min: 0.1,
+    max: 3,
+    step: 0.05,
+    group: "tone",
+  },
+  {
+    key: "midpoint",
+    label: "Midpoint",
+    type: "float",
+    default: 0.5,
+    min: 0,
+    max: 1,
+    step: 0.01,
+    group: "tone",
+  },
+];
+
+export type RendererId = "tone_dither" | "depixelate" | "repixel" | "block_mosaic";
 
 export interface StyleDef {
   id: string;
@@ -469,8 +600,13 @@ export const STYLES: StyleDef[] = [
   { id: "flow", label: "Flow — flowing waves", description: "Waves that flow around the subject", fixed: { method: "flow" } },
   { id: "bayer", label: "Ordered — Bayer grid", description: "Crisp grid dither across N tones", fixed: { method: "bayer" } },
   { id: "blue_noise", label: "Blue noise — grain", description: "Organic, grain-like dither", fixed: { method: "blue_noise" } },
-  { id: "floyd_steinberg", label: "Floyd–Steinberg", description: "Error-diffused, fine texture", fixed: { method: "floyd_steinberg" } },
-  { id: "maze", label: "Maze — labyrinth", description: "Connected diagonal labyrinth", fixed: { method: "maze" } },
+  { id: "floyd_steinberg", label: "Floyd–Steinberg — fine grain", description: "Error-diffused, fine texture", fixed: { method: "floyd_steinberg" } },
+  { id: "atkinson", label: "Atkinson — sparse, high-contrast", description: "Sparse, punchy error diffusion that keeps clean midtones — the classic Macintosh look", fixed: { method: "atkinson" } },
+  { id: "jarvis", label: "Jarvis–Judice–Ninke — softest gradients", description: "Wide diffusion — the smoothest, softest tonal gradients", fixed: { method: "jarvis" } },
+  { id: "stucki", label: "Stucki — smooth & clean", description: "Wide diffusion, clean and low-grain", fixed: { method: "stucki" } },
+  { id: "burkes", label: "Burkes — balanced grain", description: "Two-row diffusion — balanced sharpness and smoothness", fixed: { method: "burkes" } },
+  { id: "sierra", label: "Sierra — crisp & smooth", description: "Three-row diffusion — crisp detail with smooth tone", fixed: { method: "sierra" } },
+  { id: "yliluoma", label: "Yliluoma — rich colour mix", description: "Gamma-correct ordered dithering that mixes the palette to hit out-of-palette colours — best colour from a small fixed palette", fixed: { method: "yliluoma" } },
   { id: "flat", label: "Flat poster — no dither", description: "Flat N-colour poster", fixed: { method: "flat" } },
   {
     id: "depixelate",
@@ -481,16 +617,21 @@ export const STYLES: StyleDef[] = [
     fixed: {},
   },
   {
-    id: "repixel",
-    label: "Glyph art — braille + blocks",
-    description: "Recover pixel-art from terminal screenshots drawn with braille + block characters; each glyph cell becomes one true pixel",
-    renderer: "repixel",
-    params: REPIXEL_PARAMS,
+    id: "block_mosaic",
+    label: "Block mosaic — tile from blocks",
+    description:
+      "Fill the image with multi-colour block tiles — preset blocks built from the palette plus learned blocks discovered from the image; best block wins per region",
+    renderer: "block_mosaic",
+    params: BLOCK_MOSAIC_PARAMS,
+    // `method` is left as a visible knob (the match↔diffuse toggle).
     fixed: {},
   },
+  // NOTE: "Glyph art" (repixel) is intentionally unlisted — it doesn't work well
+  // yet. The renderer (repixel.ts), REPIXEL_PARAMS, and the studio wiring are kept
+  // so it can be re-enabled by restoring a StyleDef here with renderer:"repixel".
 ];
 
-export const DEFAULT_STYLE_ID = "flow";
+export const DEFAULT_STYLE_ID = "floyd_steinberg";
 
 /** The param set a style exposes (its own, or the tone-dither default). */
 export function styleParams(style: StyleDef): ParamDef[] {
@@ -499,7 +640,9 @@ export function styleParams(style: StyleDef): ParamDef[] {
 
 /** Convenience: the param defs keyed for lookup. */
 export const PARAM_BY_KEY: Record<string, ParamDef> = Object.fromEntries(
-  [...TONE_DITHER_PARAMS, ...DEPIXELATE_PARAMS, ...REPIXEL_PARAMS].map((p) => [p.key, p]),
+  [...TONE_DITHER_PARAMS, ...DEPIXELATE_PARAMS, ...REPIXEL_PARAMS, ...BLOCK_MOSAIC_PARAMS].map(
+    (p) => [p.key, p],
+  ),
 );
 
 export type { DitherMethod, PaletteMode };

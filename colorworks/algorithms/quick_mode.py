@@ -7,7 +7,6 @@ from __future__ import annotations
 # dithered output (not 2-colour). The `style_tag` drives the style-filter chips:
 #   dither   — ordered (Bayer) / blue-noise / Floyd-Steinberg (tone-accurate)
 #   flow     — structure-aware flowing "waves" that follow image contours
-#   maze     — connected diagonal labyrinth (Truchet)
 #   flat     — flat N-colour poster (no dither)
 CANDIDATES = [
     {
@@ -16,13 +15,6 @@ CANDIDATES = [
         "description": "Waves that flow around the subject",
         "style_tag": "flow",
         "params": {"method": "flow", "frequency": 5.0, "warp": 7.0, "angle_deg": 45.0, "detail": 2.5},
-    },
-    {
-        "algorithm": "tone_dither",
-        "label": "Maze",
-        "description": "Connected diagonal labyrinth",
-        "style_tag": "maze",
-        "params": {"method": "maze", "mask_scale": 5.0},
     },
     {
         "algorithm": "tone_dither",
