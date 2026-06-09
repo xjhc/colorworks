@@ -116,6 +116,20 @@
           </section>
           <div class="knobs" id="knobs"></div>
 
+          <section class="pin-block" id="pinBlock">
+            <div class="block-head">
+              <span class="num">✦</span><h2>Colour intent</h2>
+              <button type="button" id="pinClear" class="reset-colors" hidden>clear</button>
+            </div>
+            <div class="pins" id="pinTray"></div>
+            <p class="palette-hint" id="pinEmpty">
+              Pin a colour to steer generation — <b>lock</b> forces it in, <b>boost</b>
+              favours its hue, <b>exclude</b> keeps it out. Applies to adaptive palettes.
+            </p>
+            <button type="button" id="pinAdd" class="pin-add">＋ pin colour</button>
+            <input type="color" id="pinPicker" hidden />
+          </section>
+
           <section class="palette-block" id="paletteBlock" hidden>
             <div class="block-head">
               <span class="num" id="paletteCount">—</span><h2>Palette</h2>

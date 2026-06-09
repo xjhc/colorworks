@@ -8,7 +8,14 @@
    per-cell two colours laid out by a Bayer-ordered dither whose density matches
    the cell's colour mix (block=2 midtone -> the o/x checkerboard).
    ========================================================================== */
-import { buildTonePalette, type PaletteMode, type Raster, type RGB, type RenderResult } from "./colorworks";
+import {
+  buildTonePalette,
+  type PaletteMode,
+  type PinnedColor,
+  type Raster,
+  type RGB,
+  type RenderResult,
+} from "./colorworks";
 
 export interface Grid {
   pitchX: number;
@@ -37,6 +44,7 @@ export interface DepixelateOptions {
   /** Scales coverage -> lit subpixels. 1 = proportional (25%->1/4); 2 fills
    *  twice as fast (12.5%->1/4, 25%->2/4). */
   fillMult?: number;
+  pins?: PinnedColor[]; // steer the quantised palette (lock / boost / exclude)
 }
 
 interface TileOptions {
@@ -460,7 +468,7 @@ export function renderDepixelate(r: Raster, opts: DepixelateOptions = {}): Rende
   if (palMode === "original") {
     tiled = reduceToTiles(r, grid, block, { tau: opts.tau ?? 45, keepMarks, fillMult });
   } else {
-    const palette = buildTonePalette(r, opts.colors ?? 4, palMode, opts.inkColor, opts.paperColor, 42);
+    const palette = buildTonePalette(r, opts.colors ?? 4, palMode, opts.inkColor, opts.paperColor, 42, opts.pins);
     const indices = quantizeToPalette(r, palette);
     tiled = reduceToTiles(r, grid, block, { keepMarks, fillMult, palette, indices });
   }

@@ -19,6 +19,8 @@ import {
   type RGB,
   type Raster,
   type RenderOptions,
+  type PinnedColor,
+  type PinMode,
 } from "./colorworks";
 import { renderDepixelate, type DepixelateOptions } from "./depixelate";
 import { renderBlockMosaic, type BlockMosaicOptions } from "./blockmosaic";
@@ -61,6 +63,7 @@ const state = {
   knobValues: {} as Record<string, Record<string, ParamValue>>,
   render: null as RenderState | null,
   colorMap: {} as Record<string, string>, // originalHex -> replacementHex
+  pins: [] as PinnedColor[], // colours pinned BEFORE generation (lock/boost/exclude)
   hoverIdx: null as number | null,
   renderStart: 0,
   renderDebounce: 0 as ReturnType<typeof setTimeout> | 0,
@@ -351,6 +354,7 @@ function toRenderOptions(v: Record<string, ParamValue>): RenderOptions {
     inkColor: String(v.ink_color ?? "#161616"),
     paperColor: String(v.paper_color ?? "#f4ebd9"),
     seed: SEED,
+    pins: state.pins,
     params: {
       matrixSize: num("matrix_size", 8),
       noiseSize: num("noise_size", 64),
@@ -418,6 +422,7 @@ function renderFocus(): void {
         paperColor: String(vals.paper_color ?? "#f4ebd9"),
         keepMarks: vals.keep_marks === true,
         fillMult: numParam(vals, "fill_mult", 1),
+        pins: state.pins,
       });
     } else if (style.renderer === "repixel") {
       const repixelOpts: RepixelOptions = {
@@ -434,6 +439,7 @@ function renderFocus(): void {
         bgColor: String(vals.bg_color ?? "#181818"),
         spriteSat: numParam(vals, "sprite_sat", 0.3),
         eyeLuma: numParam(vals, "eye_luma", 45),
+        pins: state.pins,
       };
       res = renderRepixel(raster, repixelOpts);
       // Glyph text needs a NATIVE 1px/cell grid (the 2x4 braille grouping). Composite
@@ -464,6 +470,7 @@ function renderFocus(): void {
         method: vals.method as BlockMosaicOptions["method"],
         contrast: numParam(vals, "contrast", 1),
         midpoint: numParam(vals, "midpoint", 0.5),
+        pins: state.pins,
       });
     } else {
       res = renderToneDither(raster, toRenderOptions(vals));
@@ -485,6 +492,7 @@ function renderFocus(): void {
     cv.height = res.height;
     redrawCanvas();
     buildSwatches();
+    buildPins();
 
     const elapsed = Math.round(performance.now() - state.renderStart);
     const name = styleById(state.styleId).label.split(" — ")[0];
@@ -600,6 +608,85 @@ function openRecolor(hex: string): void {
     updateExport();
   };
   picker.click();
+}
+
+// ── colour pins (steer which colours generation picks) ─────────────────────────
+// Unlike the swatch recolour above (which edits the *result*), pins are read
+// BEFORE generation and constrain the adaptive palette: lock forces a colour in,
+// boost favours a hue, exclude keeps one out. Applies to adaptive-palette modes.
+const PIN_CYCLE: PinMode[] = ["lock", "boost", "exclude"];
+
+function buildPins(): void {
+  const tray = $("#pinTray");
+  tray.innerHTML = "";
+  state.pins.forEach((pin, i) => {
+    const chip = document.createElement("span");
+    chip.className = `pin pin-${pin.mode}`;
+    const sw = document.createElement("span");
+    sw.className = "pin-chip";
+    sw.style.background = pin.hex;
+    const hex = document.createElement("span");
+    hex.className = "pin-hex";
+    hex.textContent = pin.hex.toUpperCase();
+    const mode = document.createElement("button");
+    mode.type = "button";
+    mode.className = "pin-mode";
+    mode.textContent = pin.mode;
+    mode.title = "Change: lock → boost → exclude";
+    mode.addEventListener("click", () => cyclePin(i));
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "pin-remove";
+    rm.textContent = "✕";
+    rm.title = "Remove pin";
+    rm.addEventListener("click", () => removePin(i));
+    chip.append(sw, hex, mode, rm);
+    tray.appendChild(chip);
+  });
+  $("#pinClear").hidden = state.pins.length === 0;
+  $("#pinEmpty").hidden = state.pins.length !== 0;
+}
+
+function addPin(hex: string): void {
+  const norm = hex.toLowerCase();
+  if (state.pins.some((p) => p.hex.toLowerCase() === norm)) {
+    toast("That colour is already pinned");
+    return;
+  }
+  state.pins.push({ hex: norm, mode: "lock" });
+  buildPins();
+  scheduleRender();
+}
+
+function cyclePin(i: number): void {
+  const pin = state.pins[i];
+  if (!pin) return;
+  pin.mode = PIN_CYCLE[(PIN_CYCLE.indexOf(pin.mode) + 1) % PIN_CYCLE.length];
+  buildPins();
+  scheduleRender();
+}
+
+function removePin(i: number): void {
+  state.pins.splice(i, 1);
+  buildPins();
+  scheduleRender();
+}
+
+function bindPins(): void {
+  const picker = $<HTMLInputElement>("#pinPicker");
+  $("#pinAdd").addEventListener("click", () => {
+    // Seed with a current palette colour so the native eyedropper / tweak is handy.
+    const seed = state.render?.palette[0];
+    picker.value = seed ? rgbToHex(seed) : "#3a6ea5";
+    picker.onchange = () => addPin(picker.value);
+    picker.click();
+  });
+  $("#pinClear").addEventListener("click", () => {
+    if (state.pins.length === 0) return;
+    state.pins = [];
+    buildPins();
+    scheduleRender();
+  });
 }
 
 // ── export (local PNG + Web Crypto checksum) ──────────────────────────────────
@@ -755,6 +842,8 @@ function init(): void {
     buildSwatches();
     updateExport();
   });
+  bindPins();
+  buildPins();
   $("#copyGlyphs").addEventListener("click", () => copyGlyphText());
   showStudio(false);
 
