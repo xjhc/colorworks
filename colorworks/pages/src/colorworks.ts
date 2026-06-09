@@ -121,7 +121,7 @@ const linearToSrgbChannel = (c: number): number =>
   c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
 
 /** sRGB (0..1) → OKLab [L, a, b] written into `out` at offset `o`. */
-function srgbToOklabInto(r: number, g: number, b: number, out: Float32Array, o: number): void {
+export function srgbToOklabInto(r: number, g: number, b: number, out: Float32Array, o: number): void {
   const lr = srgbToLinearChannel(r);
   const lg = srgbToLinearChannel(g);
   const lb = srgbToLinearChannel(b);

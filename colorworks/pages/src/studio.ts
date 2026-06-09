@@ -21,8 +21,10 @@ import {
   type RenderOptions,
 } from "./colorworks";
 import { renderDepixelate, type DepixelateOptions } from "./depixelate";
+import { renderBlockMosaic, type BlockMosaicOptions } from "./blockmosaic";
 import { renderRepixel, detectCandidates, toGlyphText, type RepixelOptions } from "./repixel";
 import { boxFit, conformIndexed, type FitMode } from "./output_size";
+import { decodeToBitmap, classifyFile, decodeLabel } from "./decode";
 
 // Fixed seed — mirrors the studio's seed=42 so blue-noise/flow are stable.
 const SEED = 42;
@@ -128,14 +130,15 @@ function bindSource(): void {
 }
 
 async function loadFile(file: File): Promise<void> {
-  $("#srcName").textContent = "Decoding…";
+  $("#srcName").textContent = decodeLabel(classifyFile(file));
   let bitmap: ImageBitmap;
   try {
-    // `from-image` applies EXIF orientation so portrait photos aren't sideways.
-    bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+    // Routes by format: raster → createImageBitmap (EXIF-oriented), SVG →
+    // canvas rasterise, HEIC/TIFF → lazily-loaded decoders. See ./decode.
+    bitmap = await decodeToBitmap(file);
   } catch {
     $("#srcName").textContent = "Unsupported";
-    toast("Couldn't decode that image — try PNG, JPEG, WebP, or GIF (HEIC isn't supported in-browser)");
+    toast("Couldn't decode that file — try PNG, JPEG, WebP, GIF, AVIF, SVG, TIFF, or HEIC");
     return;
   }
 
@@ -447,6 +450,21 @@ function renderFocus(): void {
       repixelInfo =
         ` · ${star("fine")} fine ${cand.fine.toFixed(1)}px · ` +
         `${star("subject")} subject ${cand.subject.toFixed(1)}px`;
+    } else if (style.renderer === "block_mosaic") {
+      res = renderBlockMosaic(raster, {
+        block: numParam(vals, "block", 2),
+        cell: numParam(vals, "cell", 6),
+        colors: numParam(vals, "colors", 4),
+        palette: vals.palette as BlockMosaicOptions["palette"],
+        inkColor: String(vals.ink_color ?? "#161616"),
+        paperColor: String(vals.paper_color ?? "#f4ebd9"),
+        library: vals.library as BlockMosaicOptions["library"],
+        learn: numParam(vals, "learn", 6),
+        libraryBias: numParam(vals, "library_bias", 0.5),
+        method: vals.method as BlockMosaicOptions["method"],
+        contrast: numParam(vals, "contrast", 1),
+        midpoint: numParam(vals, "midpoint", 0.5),
+      });
     } else {
       res = renderToneDither(raster, toRenderOptions(vals));
     }

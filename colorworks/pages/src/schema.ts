@@ -444,7 +444,144 @@ export const REPIXEL_PARAMS: ParamDef[] = [
   },
 ];
 
-export type RendererId = "tone_dither" | "depixelate" | "repixel";
+/** Block mosaic params (mirror of blockmosaic.ts BlockMosaicOptions). */
+export const BLOCK_MOSAIC_PARAMS: ParamDef[] = [
+  {
+    key: "block",
+    label: "Block size",
+    type: "int",
+    default: 2,
+    group: "pattern",
+    options: [
+      { value: 2, label: "2×2" },
+      { value: 3, label: "3×3" },
+      { value: 4, label: "4×4" },
+    ],
+  },
+  {
+    key: "cell",
+    label: "Cell size (px)",
+    type: "int",
+    default: 6,
+    min: 2,
+    max: 16,
+    step: 1,
+    group: "pattern",
+  },
+  {
+    key: "method",
+    label: "Fill mode",
+    type: "str",
+    default: "match",
+    group: "pattern",
+    options: [
+      { value: "match", label: "Match — clean structure" },
+      { value: "diffuse", label: "Diffuse — tonal accuracy" },
+    ],
+  },
+  {
+    key: "library",
+    label: "Block library",
+    type: "str",
+    // Which preset tiles seed the candidate set. "none" leans entirely on the
+    // learned blocks (a pure vector-quantisation mosaic).
+    default: "auto",
+    group: "pattern",
+    options: [
+      { value: "auto", label: "Auto (solids + checkers + diagonals)" },
+      { value: "solids", label: "Solids only" },
+      { value: "checker", label: "Solids + checkers" },
+      { value: "none", label: "Learned only" },
+    ],
+  },
+  {
+    key: "learn",
+    label: "Learned blocks",
+    type: "int",
+    // K data-driven blocks discovered from the image by k-means. 0 = presets only.
+    default: 6,
+    min: 0,
+    max: 16,
+    step: 1,
+    group: "pattern",
+  },
+  {
+    key: "library_bias",
+    label: "Prefer library",
+    type: "float",
+    // 0 = neutral (best block wins); 1 = strongly prefer preset blocks, falling to
+    // a learned block only when it's materially better.
+    default: 0.5,
+    min: 0,
+    max: 1,
+    step: 0.05,
+    group: "pattern",
+  },
+  {
+    key: "palette",
+    label: "Palette",
+    type: "str",
+    default: "adaptive",
+    group: "palette",
+    options: [
+      { value: "adaptive", label: "Adaptive (from image)" },
+      { value: "grayscale", label: "Grayscale" },
+      { value: "duotone", label: "Duotone (ink → paper)" },
+    ],
+  },
+  {
+    key: "colors",
+    label: "Colors",
+    type: "int",
+    default: 4,
+    min: 2,
+    max: 8,
+    step: 1,
+    group: "palette",
+    // Feeds the preset library; irrelevant when running on learned blocks alone.
+    visibleWhen: { param: "library", equals: ["auto", "solids", "checker"] },
+  },
+  {
+    key: "ink_color",
+    label: "Ink Color (duotone)",
+    type: "str",
+    default: "#161616",
+    group: "palette",
+    uiHint: "color",
+    visibleWhen: { param: "palette", equals: ["duotone"] },
+  },
+  {
+    key: "paper_color",
+    label: "Paper Color (duotone)",
+    type: "str",
+    default: "#f4ebd9",
+    group: "palette",
+    uiHint: "color",
+    visibleWhen: { param: "palette", equals: ["duotone"] },
+  },
+  {
+    key: "contrast",
+    label: "Contrast",
+    type: "float",
+    default: 1,
+    min: 0.1,
+    max: 3,
+    step: 0.05,
+    group: "tone",
+  },
+  {
+    key: "midpoint",
+    label: "Midpoint",
+    type: "float",
+    default: 0.5,
+    min: 0,
+    max: 1,
+    step: 0.01,
+    group: "tone",
+  },
+];
+
+export type RendererId = "tone_dither" | "depixelate" | "repixel" | "block_mosaic";
 
 export interface StyleDef {
   id: string;
@@ -479,6 +616,16 @@ export const STYLES: StyleDef[] = [
     params: DEPIXELATE_PARAMS,
     fixed: {},
   },
+  {
+    id: "block_mosaic",
+    label: "Block mosaic — tile from blocks",
+    description:
+      "Fill the image with multi-colour block tiles — preset blocks built from the palette plus learned blocks discovered from the image; best block wins per region",
+    renderer: "block_mosaic",
+    params: BLOCK_MOSAIC_PARAMS,
+    // `method` is left as a visible knob (the match↔diffuse toggle).
+    fixed: {},
+  },
   // NOTE: "Glyph art" (repixel) is intentionally unlisted — it doesn't work well
   // yet. The renderer (repixel.ts), REPIXEL_PARAMS, and the studio wiring are kept
   // so it can be re-enabled by restoring a StyleDef here with renderer:"repixel".
@@ -493,7 +640,9 @@ export function styleParams(style: StyleDef): ParamDef[] {
 
 /** Convenience: the param defs keyed for lookup. */
 export const PARAM_BY_KEY: Record<string, ParamDef> = Object.fromEntries(
-  [...TONE_DITHER_PARAMS, ...DEPIXELATE_PARAMS, ...REPIXEL_PARAMS].map((p) => [p.key, p]),
+  [...TONE_DITHER_PARAMS, ...DEPIXELATE_PARAMS, ...REPIXEL_PARAMS, ...BLOCK_MOSAIC_PARAMS].map(
+    (p) => [p.key, p],
+  ),
 );
 
 export type { DitherMethod, PaletteMode };
