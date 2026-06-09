@@ -368,6 +368,34 @@ select {
 .swatch-hex { font-family: var(--font-mono); font-size: 9.5px; color: var(--muted); letter-spacing: 0.02em; }
 .palette-hint { font-family: var(--font-mono); font-size: 10px; color: var(--muted);
   margin: 11px 0 0; letter-spacing: 0.04em; }
+.palette-hint b { color: var(--ink-soft); font-weight: 500; }
+
+/* ── Colour intent (pins) ───────────────────────────────────────────────── */
+.pin-block { margin-bottom: 22px; }
+.pin-block .reset-colors { margin-left: auto; font-family: var(--font-mono); font-size: 9.5px;
+  text-transform: uppercase; letter-spacing: 0.08em; background: none; border: 1.5px solid var(--line);
+  color: var(--ink-soft); cursor: pointer; padding: 2px 7px; }
+.pin-block .reset-colors:hover { border-color: var(--accent); color: var(--accent-ink); }
+.pins { display: flex; flex-wrap: wrap; gap: 7px; }
+.pins:empty { display: none; }
+.pin { display: inline-flex; align-items: center; gap: 6px; padding: 4px 5px 4px 4px;
+  border: 1.5px solid var(--ink); background: var(--paper-2); box-shadow: var(--shadow-sm); }
+.pin-chip { width: 20px; height: 20px; border: 1.5px solid var(--ink); flex: none; }
+.pin-hex { font-family: var(--font-mono); font-size: 9.5px; color: var(--muted); letter-spacing: 0.02em; }
+.pin-mode { font-family: var(--font-mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em;
+  cursor: pointer; padding: 2px 6px; border: 1.5px solid var(--ink); border-radius: 999px;
+  background: var(--paper-3); color: var(--ink-soft); }
+.pin-lock .pin-mode { background: var(--ink); color: var(--paper-2); border-color: var(--ink); }
+.pin-boost .pin-mode { background: var(--accent); color: var(--paper-2); border-color: var(--accent-ink); }
+.pin-exclude .pin-mode { background: none; color: var(--muted); text-decoration: line-through; }
+.pin-exclude .pin-chip { opacity: 0.45; }
+.pin-remove { font-size: 10px; line-height: 1; cursor: pointer; border: 0; background: none;
+  color: var(--muted); padding: 0 2px; }
+.pin-remove:hover { color: var(--accent-ink); }
+.pin-add { margin-top: 11px; font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.04em;
+  cursor: pointer; padding: 6px 11px; background: none; color: var(--ink-soft);
+  border: 1.5px dashed var(--line); }
+.pin-add:hover { border-color: var(--accent); border-style: solid; color: var(--accent-ink); }
 
 /* ── Right rail / inspector ─────────────────────────────────────────────── */
 .inspector-empty { height: 100%; display: flex; flex-direction: column; align-items: center;

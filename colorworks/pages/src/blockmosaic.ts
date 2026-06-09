@@ -26,7 +26,10 @@ import {
   applyTone,
   oklabToRgb,
   srgbToOklabInto,
+  excludePinLabs,
+  rgbNearAnyLab,
   type PaletteMode,
+  type PinnedColor,
   type Raster,
   type RGB,
   type RenderResult,
@@ -60,6 +63,7 @@ export interface BlockMosaicOptions {
   method?: BlockMosaicMethod; // fill mode (default "match")
   contrast?: number;
   midpoint?: number;
+  pins?: PinnedColor[]; // steer the base palette (lock / boost / exclude)
 }
 
 // ── candidate construction ─────────────────────────────────────────────────────
@@ -341,9 +345,19 @@ export function renderBlockMosaic(raster: Raster, opts: BlockMosaicOptions = {})
     palMode,
     opts.inkColor ?? "#161616",
     opts.paperColor ?? "#f4ebd9",
+    0,
+    opts.pins,
   );
   const presets = buildPresetLibrary(libraryKind, palette, b);
-  const learned = learnBlocks(targetLab, cellCols, cellRows, b, learnK);
+  // Learned blocks are discovered from the image, so an excluded hue can still
+  // surface there — drop any learned block that uses an excluded colour so the
+  // "exclude" pin is honoured across the whole candidate set, not just presets.
+  const excludeLabs = excludePinLabs(opts.pins);
+  const learnedAll = learnBlocks(targetLab, cellCols, cellRows, b, learnK);
+  const learned =
+    excludeLabs.length === 0
+      ? learnedAll
+      : learnedAll.filter((blk) => !blk.cells.some((c) => rgbNearAnyLab(c, excludeLabs)));
   const candBlocks: Block[] = [...presets, ...learned];
   const candIsLib: boolean[] = presets.map(() => true).concat(learned.map(() => false));
   if (candBlocks.length === 0) {

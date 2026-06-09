@@ -24,6 +24,7 @@ import {
   kmeansPalette,
   parseColor,
   type PaletteMode,
+  type PinnedColor,
   type Raster,
   type RGB,
   type RenderResult,
@@ -74,6 +75,7 @@ export interface RepixelOptions {
   // composite target only:
   spriteSat?: number; // relative saturation (max-min)/max above which a pixel is "sprite" (default 0.3)
   eyeLuma?: number; // luma below which a body-interior pixel is a dark eye (default 45)
+  pins?: PinnedColor[]; // steer the foreground palette (lock / boost / exclude)
 }
 
 // ── grid detection ──────────────────────────────────────────────────────────
@@ -258,7 +260,7 @@ function windowMean(data: Uint8ClampedArray, W: number, x0: number, x1: number, 
  *  background slot). The generic adaptive path runs k-means over the whole bitmap,
  *  which is ~91% background here and so wastes nearly every slot on near-blacks;
  *  clustering the lit colours instead spends all slots on the real ink. */
-function foregroundPalette(litColors: RGB[], bg: RGB, colors: number): RGB[] {
+function foregroundPalette(litColors: RGB[], bg: RGB, colors: number, pins?: PinnedColor[]): RGB[] {
   if (litColors.length === 0) return [bg];
   const n = litColors.length;
   const data = new Uint8ClampedArray(n * 4);
@@ -269,7 +271,7 @@ function foregroundPalette(litColors: RGB[], bg: RGB, colors: number): RGB[] {
     data[o + 2] = litColors[i][2];
     data[o + 3] = 255;
   }
-  const fg = kmeansPalette({ width: n, height: 1, data }, Math.max(2, colors - 1), 42);
+  const fg = kmeansPalette({ width: n, height: 1, data }, Math.max(2, colors - 1), 42, 16, pins);
   return [bg, ...fg];
 }
 
@@ -568,8 +570,8 @@ export function renderRepixel(r: Raster, opts: RepixelOptions = {}): RenderResul
   // background); grayscale/duotone keep their fixed tonal ramps.
   const palette =
     palMode === "adaptive"
-      ? foregroundPalette(rec.litColors, rec.bg, opts.colors ?? 4)
-      : buildTonePalette(outRaster, opts.colors ?? 4, palMode, opts.inkColor, opts.paperColor, 42);
+      ? foregroundPalette(rec.litColors, rec.bg, opts.colors ?? 4, opts.pins)
+      : buildTonePalette(outRaster, opts.colors ?? 4, palMode, opts.inkColor, opts.paperColor, 42, opts.pins);
   const idx = quantizeToPalette(outRaster, palette);
   const remapped = new Uint8ClampedArray(rec.data.length);
   for (let p = 0; p < idx.length; p++) {

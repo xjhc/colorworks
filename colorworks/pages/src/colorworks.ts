@@ -29,6 +29,26 @@ import { BLUE_NOISE_TILES_B64 } from "./blue-noise-tiles";
 
 export type RGB = [number, number, number];
 export type PaletteMode = "grayscale" | "adaptive" | "duotone";
+
+/**
+ * A colour the user pins before generation, to steer which colours the adaptive
+ * palette picks (as opposed to recolouring the result after the fact).
+ *   - "lock"    — this exact colour is forced into the palette (a frozen k-means
+ *                 centroid). It always becomes a candidate; whether it ends up
+ *                 *used* still depends on the image.
+ *   - "boost"   — points near this hue are up-weighted, so the quantiser spends
+ *                 more palette slots (and thus more area) on that colour family.
+ *   - "exclude" — points near this hue are removed before clustering, so no
+ *                 palette slot lands there.
+ * Pins apply to the "adaptive" palette mode only.
+ */
+export type PinMode = "lock" | "boost" | "exclude";
+export interface PinnedColor {
+  hex: string;
+  mode: PinMode;
+  /** boost strength (≥1); ignored for lock/exclude. Default 4. */
+  weight?: number;
+}
 export type DitherMethod =
   | "bayer"
   | "blue_noise"
@@ -69,6 +89,7 @@ export interface RenderOptions {
   paperColor?: string;
   params?: RenderParams;
   seed?: number;
+  pins?: PinnedColor[];
 }
 
 export interface RenderResult {
@@ -269,9 +290,16 @@ function gaussianBlur(src: Float32Array, w: number, h: number, sigma: number): F
  *
  * Name kept as `kmeansPalette` for callers (`buildTonePalette`, `repixel`).
  */
-export function kmeansPalette(raster: Raster, colors: number, seed = 0, iters = 16): RGB[] {
+export function kmeansPalette(
+  raster: Raster,
+  colors: number,
+  seed = 0,
+  iters = 16,
+  pins?: PinnedColor[],
+): RGB[] {
   void seed;
   colors = Math.max(2, Math.floor(colors));
+  if (pins && pins.length) return constrainedKmeansPalette(raster, colors, pins, iters);
   const { width: w, height: h, data } = raster;
 
   // Subsample to a max dimension of 96 (nearest-neighbour, DOM-free), → OKLab.
@@ -424,6 +452,308 @@ export function kmeansPalette(raster: Raster, colors: number, seed = 0, iters = 
   return swatches.slice(0, colors);
 }
 
+// ── Constrained adaptive palette (pinned colours) ───────────────────────────────
+/** Squared OKLab radius treating two colours as the "same" for pin matching. */
+export const PIN_MATCH_R2 = 0.12 * 0.12;
+const PIN_BOOST_R2 = 0.16 * 0.16;
+const PIN_BOOST_DEFAULT = 4;
+
+interface PinLab {
+  L: number;
+  A: number;
+  B: number;
+  rgb: RGB;
+  weight: number;
+}
+
+function pinLabs(pins: PinnedColor[], mode: PinMode): PinLab[] {
+  const out: PinLab[] = [];
+  for (const p of pins) {
+    if (p.mode !== mode) continue;
+    const rgb = parseColor(p.hex);
+    const lab = srgbToOklab(rgb);
+    out.push({ L: lab[0], A: lab[1], B: lab[2], rgb, weight: Math.max(1, p.weight ?? PIN_BOOST_DEFAULT) });
+  }
+  return out;
+}
+
+/** OKLab labels of every "exclude" pin — for filtering downstream candidates. */
+export function excludePinLabs(pins: PinnedColor[] | undefined): Array<[number, number, number]> {
+  if (!pins) return [];
+  return pinLabs(pins, "exclude").map((p) => [p.L, p.A, p.B] as [number, number, number]);
+}
+
+/** True if `rgb` is within PIN_MATCH_R2 of any of the given OKLab labels. */
+export function rgbNearAnyLab(rgb: RGB, labs: Array<[number, number, number]>): boolean {
+  if (labs.length === 0) return false;
+  const lab = srgbToOklab(rgb);
+  for (const [L, A, B] of labs) {
+    const dL = lab[0] - L;
+    const dA = lab[1] - A;
+    const dB = lab[2] - B;
+    if (dL * dL + dA * dA + dB * dB <= PIN_MATCH_R2) return true;
+  }
+  return false;
+}
+
+/**
+ * Adaptive palette with user pins. Locked colours become frozen k-means
+ * centroids (always present, exact hue); boosted hues up-weight nearby points so
+ * the quantiser spends more slots there; excluded hues drop their points before
+ * clustering. Reduces to {@link kmeansPalette} when no pin is effective.
+ */
+function constrainedKmeansPalette(
+  raster: Raster,
+  colors: number,
+  pins: PinnedColor[],
+  iters: number,
+): RGB[] {
+  colors = Math.max(2, Math.floor(colors));
+  const locks = pinLabs(pins, "lock");
+  const boosts = pinLabs(pins, "boost");
+  const excludes = pinLabs(pins, "exclude");
+  if (locks.length === 0 && boosts.length === 0 && excludes.length === 0) {
+    return kmeansPalette(raster, colors, 0, iters);
+  }
+
+  const lockN = Math.min(locks.length, colors);
+  const freeN = colors - lockN;
+
+  // Subsample → OKLab points (same ≤96px lattice as kmeansPalette).
+  const { width: w, height: h, data } = raster;
+  const maxDim = Math.max(w, h);
+  const s = maxDim > 96 ? 96 / maxDim : 1;
+  const sw = Math.max(1, Math.round(w * s));
+  const sh = Math.max(1, Math.round(h * s));
+  const m0 = sw * sh;
+  const Praw = new Float32Array(m0 * 3);
+  for (let ty = 0; ty < sh; ty++) {
+    const syRow = Math.min(h - 1, Math.floor(ty / s)) * w;
+    for (let tx = 0; tx < sw; tx++) {
+      const sx = Math.min(w - 1, Math.floor(tx / s));
+      const src = (syRow + sx) * 4;
+      srgbToOklabInto(data[src] / 255, data[src + 1] / 255, data[src + 2] / 255, Praw, (ty * sw + tx) * 3);
+    }
+  }
+
+  // Exclusion: drop points near any exclude pin (keep all if that empties it).
+  const keep: number[] = [];
+  for (let i = 0; i < m0; i++) {
+    let drop = false;
+    for (const e of excludes) {
+      const dL = Praw[i * 3] - e.L;
+      const dA = Praw[i * 3 + 1] - e.A;
+      const dB = Praw[i * 3 + 2] - e.B;
+      if (dL * dL + dA * dA + dB * dB <= PIN_MATCH_R2) {
+        drop = true;
+        break;
+      }
+    }
+    if (!drop) keep.push(i);
+  }
+  const pick = keep.length >= Math.max(freeN, 1) ? keep : Array.from({ length: m0 }, (_, i) => i);
+  const m = pick.length;
+
+  // Fix-palette: no free slots → palette is exactly the locked colours.
+  if (freeN <= 0 || m === 0) {
+    const sw2 = locks.slice(0, Math.max(colors, 2)).map((l) => l.rgb);
+    sw2.sort((a, b) => luma(a[0], a[1], a[2]) - luma(b[0], b[1], b[2]));
+    return sw2;
+  }
+
+  // Compacted points + per-point boost weights.
+  const P = new Float32Array(m * 3);
+  const Wt = new Float64Array(m);
+  for (let i = 0; i < m; i++) {
+    const o = pick[i] * 3;
+    const L = Praw[o];
+    const A = Praw[o + 1];
+    const B = Praw[o + 2];
+    P[i * 3] = L;
+    P[i * 3 + 1] = A;
+    P[i * 3 + 2] = B;
+    let wt = 1;
+    for (const bp of boosts) {
+      const dL = L - bp.L;
+      const dA = A - bp.A;
+      const dB = B - bp.B;
+      if (dL * dL + dA * dA + dB * dB <= PIN_BOOST_R2) wt *= bp.weight;
+    }
+    Wt[i] = wt;
+  }
+
+  const sq = (i: number, cL: number, cA: number, cB: number): number => {
+    const p = i * 3;
+    const dL = P[p] - cL;
+    const dA = P[p + 1] - cA;
+    const dB = P[p + 2] - cB;
+    return dL * dL + dA * dA + dB * dB;
+  };
+
+  const k = lockN + freeN; // == colors
+  const C = new Float32Array(k * 3);
+  for (let l = 0; l < lockN; l++) {
+    C[l * 3] = locks[l].L;
+    C[l * 3 + 1] = locks[l].A;
+    C[l * 3 + 2] = locks[l].B;
+  }
+
+  // Weighted median-cut to seed the `freeN` free centroids (boost biases splits).
+  const idx = new Int32Array(m);
+  for (let i = 0; i < m; i++) idx[i] = i;
+  const wstats = (lo: number, hi: number) => {
+    let WT = 0;
+    let mL = 0;
+    let mA = 0;
+    let mB = 0;
+    for (let i = lo; i < hi; i++) {
+      const p = idx[i] * 3;
+      const wt = Wt[idx[i]];
+      WT += wt;
+      mL += wt * P[p];
+      mA += wt * P[p + 1];
+      mB += wt * P[p + 2];
+    }
+    if (WT === 0) WT = 1;
+    mL /= WT;
+    mA /= WT;
+    mB /= WT;
+    let vL = 0;
+    let vA = 0;
+    let vB = 0;
+    for (let i = lo; i < hi; i++) {
+      const p = idx[i] * 3;
+      const wt = Wt[idx[i]];
+      const dL = P[p] - mL;
+      const dA = P[p + 1] - mA;
+      const dB = P[p + 2] - mB;
+      vL += wt * dL * dL;
+      vA += wt * dA * dA;
+      vB += wt * dB * dB;
+    }
+    return { WT, mL, mA, mB, vL, vA, vB, sse: vL + vA + vB };
+  };
+  const boxes: Array<{ lo: number; hi: number }> = [{ lo: 0, hi: m }];
+  while (boxes.length < freeN) {
+    let bi = -1;
+    let bestSse = -1;
+    for (let b = 0; b < boxes.length; b++) {
+      if (boxes[b].hi - boxes[b].lo <= 1) continue;
+      const sse = wstats(boxes[b].lo, boxes[b].hi).sse;
+      if (sse > bestSse) {
+        bestSse = sse;
+        bi = b;
+      }
+    }
+    if (bi < 0) break;
+    const box = boxes[bi];
+    const st = wstats(box.lo, box.hi);
+    const axis = st.vL >= st.vA && st.vL >= st.vB ? 0 : st.vA >= st.vB ? 1 : 2;
+    const slice = Array.from(idx.subarray(box.lo, box.hi));
+    slice.sort((p, q) => P[p * 3 + axis] - P[q * 3 + axis]);
+    for (let i = 0; i < slice.length; i++) idx[box.lo + i] = slice[i];
+    const half = st.WT / 2;
+    let acc = 0;
+    let mid = box.lo + 1;
+    for (let i = box.lo; i < box.hi - 1; i++) {
+      acc += Wt[idx[i]];
+      mid = i + 1;
+      if (acc >= half) break;
+    }
+    if (mid <= box.lo) mid = box.lo + 1;
+    if (mid >= box.hi) mid = box.hi - 1;
+    boxes[bi] = { lo: box.lo, hi: mid };
+    boxes.push({ lo: mid, hi: box.hi });
+  }
+  for (let b = 0; b < boxes.length; b++) {
+    const st = wstats(boxes[b].lo, boxes[b].hi);
+    const j = lockN + b;
+    C[j * 3] = st.mL;
+    C[j * 3 + 1] = st.mA;
+    C[j * 3 + 2] = st.mB;
+  }
+  // Tiny image: fewer boxes than freeN — fill the rest on far points.
+  for (let b = boxes.length; b < freeN; b++) {
+    const j = lockN + b;
+    let far = 0;
+    let worst = -1;
+    for (let i = 0; i < m; i++) {
+      let best = Infinity;
+      for (let q = 0; q < j; q++) {
+        const dd = sq(i, C[q * 3], C[q * 3 + 1], C[q * 3 + 2]);
+        if (dd < best) best = dd;
+      }
+      if (best > worst) {
+        worst = best;
+        far = i;
+      }
+    }
+    C[j * 3] = P[far * 3];
+    C[j * 3 + 1] = P[far * 3 + 1];
+    C[j * 3 + 2] = P[far * 3 + 2];
+  }
+
+  // Lloyd iterations: assign to all k centroids, update only the free ones.
+  const labels = new Int32Array(m);
+  const sums = new Float64Array(k * 3);
+  const wsum = new Float64Array(k);
+  for (let it = 0; it < iters; it++) {
+    for (let i = 0; i < m; i++) {
+      let best = Infinity;
+      let bj = 0;
+      for (let j = 0; j < k; j++) {
+        const dd = sq(i, C[j * 3], C[j * 3 + 1], C[j * 3 + 2]);
+        if (dd < best) {
+          best = dd;
+          bj = j;
+        }
+      }
+      labels[i] = bj;
+    }
+    sums.fill(0);
+    wsum.fill(0);
+    for (let i = 0; i < m; i++) {
+      const j = labels[i];
+      const wt = Wt[i];
+      wsum[j] += wt;
+      sums[j * 3] += wt * P[i * 3];
+      sums[j * 3 + 1] += wt * P[i * 3 + 1];
+      sums[j * 3 + 2] += wt * P[i * 3 + 2];
+    }
+    for (let j = lockN; j < k; j++) {
+      if (wsum[j] > 0) {
+        C[j * 3] = sums[j * 3] / wsum[j];
+        C[j * 3 + 1] = sums[j * 3 + 1] / wsum[j];
+        C[j * 3 + 2] = sums[j * 3 + 2] / wsum[j];
+      } else {
+        let far = 0;
+        let worst = -1;
+        for (let i = 0; i < m; i++) {
+          let best = Infinity;
+          for (let q = 0; q < k; q++) {
+            const dd = sq(i, C[q * 3], C[q * 3 + 1], C[q * 3 + 2]);
+            if (dd < best) best = dd;
+          }
+          if (best > worst) {
+            worst = best;
+            far = i;
+          }
+        }
+        C[j * 3] = P[far * 3];
+        C[j * 3 + 1] = P[far * 3 + 1];
+        C[j * 3 + 2] = P[far * 3 + 2];
+      }
+    }
+  }
+
+  // Locked centroids emit their exact pinned RGB; free centroids round-trip.
+  const swatches: RGB[] = [];
+  for (let l = 0; l < lockN; l++) swatches.push(locks[l].rgb);
+  for (let j = lockN; j < k; j++) swatches.push(oklabToRgb(C[j * 3], C[j * 3 + 1], C[j * 3 + 2]));
+  swatches.sort((a, b) => luma(a[0], a[1], a[2]) - luma(b[0], b[1], b[2]));
+  return swatches.slice(0, colors);
+}
+
 export function buildTonePalette(
   raster: Raster,
   colors: number,
@@ -431,6 +761,7 @@ export function buildTonePalette(
   inkColor = "#161616",
   paperColor = "#f4ebd9",
   seed = 0,
+  pins?: PinnedColor[],
 ): RGB[] {
   colors = Math.max(2, Math.floor(colors));
   if (mode === "grayscale") {
@@ -445,7 +776,7 @@ export function buildTonePalette(
       lerpRgb(ink, paper, i / (colors - 1)),
     );
   }
-  return kmeansPalette(raster, colors, seed);
+  return kmeansPalette(raster, colors, seed, 16, pins);
 }
 
 // ── Threshold masks ───────────────────────────────────────────────────────────
@@ -966,6 +1297,7 @@ export function renderToneDither(raster: Raster, opts: RenderOptions = {}): Rend
     opts.inkColor ?? "#161616",
     opts.paperColor ?? "#f4ebd9",
     seed,
+    opts.pins,
   );
 
   const rgb01 = rasterToRgb01(raster);
