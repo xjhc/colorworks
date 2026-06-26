@@ -581,7 +581,147 @@ export const BLOCK_MOSAIC_PARAMS: ParamDef[] = [
   },
 ];
 
-export type RendererId = "tone_dither" | "depixelate" | "repixel" | "block_mosaic";
+/** Knit chart params (chart dimensions live in the shared Output Size panel). */
+export const KNIT_PARAMS: ParamDef[] = [
+  {
+    key: "row_gauge",
+    label: "Row gauge (rows ÷ sts)",
+    type: "float",
+    // A stockinette stitch is wider than tall (more rows/inch than sts/inch), so
+    // rows are inflated by this ratio and the knitted fabric matches the source.
+    // 1.0 = square chart (no correction). 1.4 ≈ typical stockinette.
+    default: 1.4,
+    min: 0.8,
+    max: 2,
+    step: 0.05,
+    group: "pattern",
+  },
+  {
+    key: "cell",
+    label: "Cell size (px)",
+    type: "int",
+    default: 8,
+    min: 4,
+    max: 16,
+    step: 1,
+    group: "pattern",
+  },
+  {
+    key: "method",
+    label: "Dither method",
+    type: "str",
+    // Error diffusion gives the salt-and-pepper colorwork in flat-tone regions and
+    // solid runs in saturated ones; "flat" is solid blocks only (no tone).
+    default: "floyd_steinberg",
+    group: "pattern",
+    options: [
+      { value: "floyd_steinberg", label: "Floyd–Steinberg (fine grain)" },
+      { value: "atkinson", label: "Atkinson (sparse, crisp)" },
+      { value: "stucki", label: "Stucki (smooth)" },
+      { value: "yliluoma", label: "Yliluoma (palette mix)" },
+      { value: "flat", label: "Flat (solid blocks)" },
+    ],
+  },
+  {
+    key: "grid",
+    label: "Chart grid",
+    type: "str",
+    default: "decades",
+    group: "pattern",
+    options: [
+      { value: "decades", label: "Lines + bold every 10" },
+      { value: "lines", label: "Thin lines" },
+      { value: "none", label: "None (cells only)" },
+    ],
+  },
+  {
+    key: "symbols",
+    label: "Chart symbols",
+    type: "str",
+    default: "cells",
+    group: "pattern",
+    options: [
+      { value: "cells", label: "Cells + legend" },
+      { value: "legend", label: "Legend only" },
+      { value: "none", label: "None" },
+    ],
+  },
+  {
+    key: "tidy",
+    label: "Merge lone stitches",
+    type: "bool",
+    // Off by default: a fully-isolated stitch is merged into its surroundings, but
+    // a deliberate sparse contrast dot is locally identical to a stray, so this
+    // also erases the faintest 1-stitch dots. On = cleaner, more solid chart.
+    default: false,
+    group: "pattern",
+  },
+  {
+    key: "palette",
+    label: "Yarn palette",
+    type: "str",
+    default: "adaptive",
+    group: "palette",
+    options: [
+      { value: "adaptive", label: "Adaptive (from image)" },
+      { value: "grayscale", label: "Grayscale" },
+      { value: "duotone", label: "Duotone (ink → paper)" },
+    ],
+  },
+  {
+    key: "colors",
+    label: "Yarn count",
+    type: "int",
+    // 5 (not 4) by default: the extra yarn lets adaptive allocate a mid-grey for
+    // a dark textured field, so a halftone background dithers into GREY dots
+    // instead of borrowing a saturated foreground yarn. Still very knittable.
+    default: 5,
+    min: 2,
+    max: 8,
+    step: 1,
+    group: "palette",
+  },
+  {
+    key: "ink_color",
+    label: "Ink Color (duotone)",
+    type: "str",
+    default: "#161616",
+    group: "palette",
+    uiHint: "color",
+    visibleWhen: { param: "palette", equals: ["duotone"] },
+  },
+  {
+    key: "paper_color",
+    label: "Paper Color (duotone)",
+    type: "str",
+    default: "#f4ebd9",
+    group: "palette",
+    uiHint: "color",
+    visibleWhen: { param: "palette", equals: ["duotone"] },
+  },
+  {
+    key: "contrast",
+    label: "Contrast",
+    type: "float",
+    default: 1,
+    min: 0.1,
+    max: 3,
+    step: 0.05,
+    group: "tone",
+  },
+  {
+    key: "midpoint",
+    label: "Midpoint",
+    type: "float",
+    default: 0.5,
+    min: 0,
+    max: 1,
+    step: 0.01,
+    group: "tone",
+  },
+];
+
+export type RendererId = "tone_dither" | "depixelate" | "repixel" | "block_mosaic" | "knit";
 
 export interface StyleDef {
   id: string;
@@ -626,6 +766,15 @@ export const STYLES: StyleDef[] = [
     // `method` is left as a visible knob (the match↔diffuse toggle).
     fixed: {},
   },
+  {
+    id: "knit",
+    label: "Knit chart — stranded colorwork",
+    description:
+      "Turn the image into a knitting chart: 1 pixel = 1 stitch, quantised to a few yarns and dithered so flat tones become salt-and-pepper colorwork and solid shapes become solid runs; gauge-corrected rows, baked grid, and a yarn legend",
+    renderer: "knit",
+    params: KNIT_PARAMS,
+    fixed: {},
+  },
   // NOTE: "Glyph art" (repixel) is intentionally unlisted — it doesn't work well
   // yet. The renderer (repixel.ts), REPIXEL_PARAMS, and the studio wiring are kept
   // so it can be re-enabled by restoring a StyleDef here with renderer:"repixel".
@@ -640,9 +789,13 @@ export function styleParams(style: StyleDef): ParamDef[] {
 
 /** Convenience: the param defs keyed for lookup. */
 export const PARAM_BY_KEY: Record<string, ParamDef> = Object.fromEntries(
-  [...TONE_DITHER_PARAMS, ...DEPIXELATE_PARAMS, ...REPIXEL_PARAMS, ...BLOCK_MOSAIC_PARAMS].map(
-    (p) => [p.key, p],
-  ),
+  [
+    ...TONE_DITHER_PARAMS,
+    ...DEPIXELATE_PARAMS,
+    ...REPIXEL_PARAMS,
+    ...BLOCK_MOSAIC_PARAMS,
+    ...KNIT_PARAMS,
+  ].map((p) => [p.key, p]),
 );
 
 export type { DitherMethod, PaletteMode };

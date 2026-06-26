@@ -359,7 +359,12 @@ select {
 .swatch { display: flex; flex-direction: column; align-items: center; gap: 5px; cursor: pointer;
   background: none; border: 0; padding: 0; }
 .swatch-chip { width: 46px; height: 46px; border: 1.5px solid var(--ink); box-shadow: var(--shadow-sm);
-  transition: transform .1s, box-shadow .1s; position: relative; }
+  transition: transform .1s, box-shadow .1s; position: relative; display: grid; place-items: center; }
+.swatch-symbol {
+  font-family: var(--font-mono); font-size: 15px; font-weight: 500; line-height: 1;
+  color: var(--ink); background: rgba(248,241,225,.86);
+  border: 1px solid rgba(28,23,18,.55); padding: 2px 5px;
+}
 .swatch:hover .swatch-chip { transform: translate(-1px,-1px); box-shadow: 6px 6px 0 rgba(28,23,18,.14); }
 .swatch.active .swatch-chip { box-shadow: 0 0 0 2px var(--paper-2), 0 0 0 4px var(--accent); }
 .swatch.remapped .swatch-chip::after { content: "✎"; position: absolute; top: -7px; right: -7px;
