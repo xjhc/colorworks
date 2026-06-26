@@ -24,6 +24,7 @@ import {
 } from "./colorworks";
 import { renderDepixelate, type DepixelateOptions } from "./depixelate";
 import { renderBlockMosaic, type BlockMosaicOptions } from "./blockmosaic";
+import { renderKnit, type KnitOptions, type KnitSymbolMode } from "./knit";
 import { renderRepixel, detectCandidates, toGlyphText, type RepixelOptions } from "./repixel";
 import { boxFit, conformIndexed, type FitMode } from "./output_size";
 import { decodeToBitmap, classifyFile, decodeLabel } from "./decode";
@@ -48,6 +49,21 @@ interface RenderState {
   h: number;
   idx: Uint16Array;
   palette: RGB[];
+  swatchCount?: number;
+  knit?: {
+    cols: number;
+    rows: number;
+    cell: number;
+    stitchIdx: Uint16Array;
+    symbols: string[];
+    symbolMode: KnitSymbolMode;
+  };
+}
+
+interface SetupState {
+  maxW: number | null;
+  maxH: number | null;
+  fit: FitMode;
 }
 
 const state = {
@@ -55,7 +71,7 @@ const state = {
   sourceName: "image",
   sourceW: 0,
   sourceH: 0,
-  setup: { maxW: 360 as number | null, maxH: null as number | null, fit: "fit" as FitMode },
+  setupValues: {} as Record<string, SetupState>,
   styleId: DEFAULT_STYLE_ID,
   // Knob state bucketed by renderer so each mode keeps its own defaults (e.g.
   // Repixel's palette:"original"); the six tone-dither styles share one renderer
@@ -79,9 +95,25 @@ function styleById(id: string): StyleDef {
   return STYLES.find((s) => s.id === id) ?? STYLES[0];
 }
 
+function rendererKey(style = styleById(state.styleId)): string {
+  return style.renderer ?? "tone_dither";
+}
+
+function defaultSetupForRenderer(renderer: string): SetupState {
+  if (renderer === "knit") return { maxW: 200, maxH: null, fit: "fit" };
+  return { maxW: 360, maxH: null, fit: "fit" };
+}
+
+/** Output-size state is per renderer, just like knobs. For knit, maxW/maxH are
+ *  stitch counts; for the image renderers, they are output pixels. */
+function setupBucket(): SetupState {
+  const key = rendererKey();
+  return (state.setupValues[key] ??= { ...defaultSetupForRenderer(key) });
+}
+
 /** The current style's knob bucket (created on first access), keyed by renderer. */
 function knobBucket(): Record<string, ParamValue> {
-  const renderer = styleById(state.styleId).renderer ?? "tone_dither";
+  const renderer = rendererKey();
   return (state.knobValues[renderer] ??= {});
 }
 
@@ -168,22 +200,45 @@ async function loadFile(file: File): Promise<void> {
 function bindOutput(): void {
   $<HTMLInputElement>("#maxW").addEventListener("input", (e) => {
     const v = parseInt((e.target as HTMLInputElement).value, 10);
-    state.setup.maxW = Number.isFinite(v) && v > 0 ? v : null;
+    setupBucket().maxW = Number.isFinite(v) && v > 0 ? v : null;
     scheduleRender();
   });
   $<HTMLInputElement>("#maxH").addEventListener("input", (e) => {
     const v = parseInt((e.target as HTMLInputElement).value, 10);
-    state.setup.maxH = Number.isFinite(v) && v > 0 ? v : null;
+    setupBucket().maxH = Number.isFinite(v) && v > 0 ? v : null;
     scheduleRender();
   });
   $$("#fitGroup button").forEach((b) =>
     b.addEventListener("click", () => {
       $$("#fitGroup button").forEach((x) => x.classList.remove("active"));
       b.classList.add("active");
-      state.setup.fit = (b.dataset.fit as FitMode) || "fit";
+      setupBucket().fit = (b.dataset.fit as FitMode) || "fit";
       scheduleRender();
     }),
   );
+}
+
+function updateOutputPanel(): void {
+  const style = styleById(state.styleId);
+  const knit = rendererKey(style) === "knit";
+  const setup = setupBucket();
+  const maxW = $<HTMLInputElement>("#maxW");
+  const maxH = $<HTMLInputElement>("#maxH");
+  maxW.value = setup.maxW === null ? "" : String(setup.maxW);
+  maxH.value = setup.maxH === null ? "" : String(setup.maxH);
+  maxW.min = knit ? "40" : "16";
+  maxW.max = knit ? "400" : "4096";
+  maxH.min = knit ? "1" : "16";
+  maxH.max = knit ? "800" : "4096";
+  maxH.placeholder = "auto";
+  $("#outputTitle").textContent = knit ? "Chart size" : "Output size";
+  $("#maxWLabel").textContent = knit ? "stitches W" : "max W";
+  $("#maxHLabel").textContent = knit ? "rows H" : "max H";
+  $("#outputNote").textContent = knit
+    ? "For knit charts, W/H are stitch counts. Leave rows H auto to derive it from row gauge; cell size controls PNG scale."
+    : "Low sizes (~150–250px) give the chunky, pixelated dither look. Everything renders in your browser.";
+  $("#fitGroup").hidden = knit;
+  $$("#fitGroup button").forEach((b) => b.classList.toggle("active", b.dataset.fit === setup.fit));
 }
 
 // ── style + knobs ─────────────────────────────────────────────────────────────
@@ -207,6 +262,7 @@ function applyStyle(styleId: string): void {
   state.colorMap = {}; // a new look starts from its own palette
   state.hoverIdx = null;
   setZoomFit();
+  updateOutputPanel();
   buildKnobs();
   renderFocus();
 }
@@ -370,7 +426,7 @@ function toRenderOptions(v: Record<string, ParamValue>): RenderOptions {
 /** Draw the source into an offscreen canvas at the output size and read pixels.
  *  `fullRes` ignores the output-size setting (depixelate needs the native grid). */
 function rasterizeSource(fullRes = false): Raster {
-  const { maxW, maxH, fit } = state.setup;
+  const { maxW, maxH, fit } = setupBucket();
   const sw = state.sourceW;
   const sh = state.sourceH;
   const mw = fullRes || !(maxW && maxW > 0) ? null : maxW;
@@ -405,11 +461,18 @@ function renderFocus(): void {
     const style = styleById(state.styleId);
     const vals = gatherValues();
     let repixelInfo = ""; // candidate pixel-size readout (repixel only)
+    let knitInfo = ""; // stitch-count / yarn readout (knit only)
+    let swatchCount: number | undefined;
+    let knitMeta: RenderState["knit"];
     state.glyphText = ""; // reset; set below only for the repixel renderer
-    // Depixelate and Repixel derive their own resolution from the full-res grid,
-    // so they must see the source at native size (not the output-downscaled raster).
-    const gridRenderer = style.renderer === "depixelate" || style.renderer === "repixel";
-    const raster = rasterizeSource(gridRenderer);
+    // Depixelate, Repixel, and Knit derive their own resolution from the full-res
+    // grid, so they must see the source at native size (not the output-downscaled
+    // raster). Knit also owns its exact chart size and is never conformed below.
+    const nativeRes =
+      style.renderer === "depixelate" ||
+      style.renderer === "repixel" ||
+      style.renderer === "knit";
+    const raster = rasterizeSource(nativeRes);
     let res: ReturnType<typeof renderToneDither>;
     if (style.renderer === "depixelate") {
       res = renderDepixelate(raster, {
@@ -472,6 +535,42 @@ function renderFocus(): void {
         midpoint: numParam(vals, "midpoint", 0.5),
         pins: state.pins,
       });
+    } else if (style.renderer === "knit") {
+      const setup = setupBucket();
+      const kres = renderKnit(raster, {
+        stitches: setup.maxW && setup.maxW > 0 ? setup.maxW : 200,
+        rows: setup.maxH && setup.maxH > 0 ? setup.maxH : undefined,
+        rowGauge: numParam(vals, "row_gauge", 1.4),
+        cell: numParam(vals, "cell", 8),
+        colors: numParam(vals, "colors", 5),
+        palette: vals.palette as KnitOptions["palette"],
+        inkColor: String(vals.ink_color ?? "#161616"),
+        paperColor: String(vals.paper_color ?? "#f4ebd9"),
+        method: vals.method as KnitOptions["method"],
+        symbols: vals.symbols as KnitOptions["symbols"],
+        grid: vals.grid as KnitOptions["grid"],
+        tidy: vals.tidy === true,
+        contrast: numParam(vals, "contrast", 1),
+        midpoint: numParam(vals, "midpoint", 0.5),
+        pins: state.pins,
+      });
+      res = kres;
+      swatchCount = kres.yarns.length;
+      const symbolMode = (vals.symbols as KnitSymbolMode) ?? "cells";
+      knitMeta = {
+        cols: kres.stitchesWide,
+        rows: kres.rowsTall,
+        cell: kres.cellSize,
+        stitchIdx: kres.stitchIndices,
+        symbols: kres.symbols,
+        symbolMode,
+      };
+      const n = kres.yarns.length;
+      const stats = kres.stranding;
+      knitInfo =
+        ` · ${kres.stitchesWide} × ${kres.rowsTall} sts · ${n} yarn${n === 1 ? "" : "s"}` +
+        ` · max float ${stats.maxFloat}` +
+        ` · max ${stats.maxYarnsPerRow} yarns/row`;
     } else {
       res = renderToneDither(raster, toRenderOptions(vals));
     }
@@ -480,11 +579,13 @@ function renderFocus(): void {
     // so the preview and exported PNG honour it (other renderers already do).
     // EXCEPT composite: it draws gapped braille dots at source resolution, and
     // nearest-neighbour downscaling would alias the dots away — so it keeps native.
-    if (gridRenderer && vals.target !== "composite") {
-      const { maxW, maxH, fit } = state.setup;
+    // Knit is excluded too: it owns its exact chart size (cell-px stitches + grid).
+    const conformable = style.renderer === "depixelate" || style.renderer === "repixel";
+    if (conformable && vals.target !== "composite") {
+      const { maxW, maxH, fit } = setupBucket();
       res = conformIndexed(res, maxW && maxW > 0 ? maxW : null, maxH && maxH > 0 ? maxH : null, fit);
     }
-    state.render = { w: res.width, h: res.height, idx: res.indices, palette: res.palette };
+    state.render = { w: res.width, h: res.height, idx: res.indices, palette: res.palette, swatchCount, knit: knitMeta };
     state.hoverIdx = null;
 
     const cv = $<HTMLCanvasElement>("#bigCanvas");
@@ -497,7 +598,7 @@ function renderFocus(): void {
     const elapsed = Math.round(performance.now() - state.renderStart);
     const name = styleById(state.styleId).label.split(" — ")[0];
     // repixelInfo is built only from numbers + bullet glyphs (no user input).
-    $("#bigCaption").innerHTML = `<b>${name}</b> · ${res.width} × ${res.height} px${repixelInfo}`;
+    $("#bigCaption").innerHTML = `<b>${name}</b> · ${res.width} × ${res.height} px${repixelInfo}${knitInfo}`;
     $("#specDims").textContent = `${res.width} × ${res.height}`;
     $("#specRender").textContent = `${elapsed} ms`;
     $("#copyGlyphs").hidden = style.renderer !== "repixel";
@@ -551,7 +652,34 @@ function redrawCanvas(): void {
     out[o + 2] = c[2];
     out[o + 3] = 255;
   }
-  $<HTMLCanvasElement>("#bigCanvas").getContext("2d")!.putImageData(new ImageData(out, W, H), 0, 0);
+  const ctx = $<HTMLCanvasElement>("#bigCanvas").getContext("2d")!;
+  ctx.putImageData(new ImageData(out, W, H), 0, 0);
+  drawKnitSymbols(ctx, R, oc);
+}
+
+function drawKnitSymbols(ctx: CanvasRenderingContext2D, R: RenderState, palette: RGB[]): void {
+  const k = R.knit;
+  if (!k || k.symbolMode !== "cells" || k.symbols.length === 0 || k.cell < 7) return;
+  const hi = state.hoverIdx;
+  const fontSize = Math.max(6, Math.floor(k.cell * 0.68));
+  ctx.save();
+  ctx.globalAlpha = 1;
+  ctx.font = `700 ${fontSize}px "DM Mono", monospace`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  for (let y = 0; y < k.rows; y++) {
+    const cy = y * k.cell + k.cell / 2;
+    for (let x = 0; x < k.cols; x++) {
+      const v = k.stitchIdx[y * k.cols + x];
+      const symbol = k.symbols[v];
+      if (!symbol || (hi !== null && v !== hi)) continue;
+      const c = palette[v] ?? [0, 0, 0];
+      const lum = c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722;
+      ctx.fillStyle = lum > 150 ? "#1c1712" : "#f8f1e1";
+      ctx.fillText(symbol, x * k.cell + k.cell / 2, cy + 0.25);
+    }
+  }
+  ctx.restore();
 }
 
 // ── palette swatches ──────────────────────────────────────────────────────────
@@ -560,16 +688,18 @@ function buildSwatches(): void {
   const block = $("#paletteBlock");
   const wrap = $("#swatches");
   wrap.innerHTML = "";
-  if (!R || R.palette.length > 32) {
+  const swatchCount = R?.swatchCount ?? R?.palette.length ?? 0;
+  if (!R || swatchCount > 32) {
     block.hidden = true;
     return;
   }
   block.hidden = false;
-  $("#paletteCount").textContent = String(R.palette.length);
+  $("#paletteCount").textContent = String(swatchCount);
 
-  R.palette.forEach((c, i) => {
+  R.palette.slice(0, swatchCount).forEach((c, i) => {
     const hex = rgbToHex(c);
     const shown = state.colorMap[hex] || hex;
+    const symbol = R.knit?.symbols[i];
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "swatch" + (state.colorMap[hex] ? " remapped" : "");
@@ -577,9 +707,15 @@ function buildSwatches(): void {
     const chip = document.createElement("span");
     chip.className = "swatch-chip";
     chip.style.background = shown;
+    if (symbol) {
+      const sym = document.createElement("span");
+      sym.className = "swatch-symbol";
+      sym.textContent = symbol;
+      chip.append(sym);
+    }
     const label = document.createElement("span");
     label.className = "swatch-hex";
-    label.textContent = shown.toUpperCase();
+    label.textContent = symbol ? `${symbol} ${shown.toUpperCase()}` : shown.toUpperCase();
     btn.append(chip, label);
     btn.addEventListener("mouseenter", () => {
       state.hoverIdx = i;
@@ -833,6 +969,7 @@ function init(): void {
   buildStyleSelect();
   bindSource();
   bindOutput();
+  updateOutputPanel();
   bindZoom();
   bindPan();
   $("#resetColors").addEventListener("click", () => {

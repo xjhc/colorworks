@@ -46,15 +46,15 @@
           </button>
         </section>
 
-        <section class="block">
-          <div class="block-head"><span class="num">02</span><h2>Output size</h2></div>
+        <section class="block" id="outputBlock">
+          <div class="block-head"><span class="num">02</span><h2 id="outputTitle">Output size</h2></div>
           <div class="field-row">
             <label class="field">
-              <span>max W</span>
+              <span id="maxWLabel">max W</span>
               <input id="maxW" type="number" value="360" min="16" max="4096" inputmode="numeric" />
             </label>
             <label class="field">
-              <span>max H</span>
+              <span id="maxHLabel">max H</span>
               <input id="maxH" type="number" placeholder="auto" min="16" max="4096" inputmode="numeric" />
             </label>
           </div>
@@ -63,7 +63,7 @@
             <button type="button" data-fit="cover">Cover</button>
             <button type="button" data-fit="stretch">Stretch</button>
           </div>
-          <p class="field-note">Low sizes (~150–250px) give the chunky, pixelated dither look. Everything renders in your browser.</p>
+          <p class="field-note" id="outputNote">Low sizes (~150–250px) give the chunky, pixelated dither look. Everything renders in your browser.</p>
         </section>
       </aside>
 
