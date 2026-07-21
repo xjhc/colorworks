@@ -8,7 +8,12 @@ import {
   errorDiffuseToPalette,
   DIFFUSION_KERNELS,
   yliluomaToPalette,
+  ostromoukhovToPalette,
+  knollToPalette,
+  emaToPalette,
   flowThresholdMap,
+  ignThresholdMap,
+  r2ThresholdMap,
   dedupePalette,
   renderToneDither,
   rasterToRgb01,
@@ -325,6 +330,227 @@ describe("yliluoma positional dithering", () => {
   });
 });
 
+// ── 4d. N-candidate dithers (Knoll, EMA) reproduce the local mean ──────────────
+describe("N-candidate ordered dithering (knoll / ema)", () => {
+  const BW: RGB[] = [
+    [0, 0, 0],
+    [255, 255, 255],
+  ];
+  // These two work in the libimagequant-weighted gamma space, so on a flat gray
+  // the fraction of white pixels should land on the target's value in THAT
+  // space — pow(g, 0.57/0.45455). (Contrast `yliluoma`, which mixes in linear
+  // light and so targets pow(g, 2.2); the 4c block above covers that.)
+  const LIQ_EXPONENT = 0.57 / 0.45455;
+  const idealWhiteFraction = (g: number) => Math.pow(g / 255, LIQ_EXPONENT);
+
+  const flatGray = (g: number, w = 64, h = 64) =>
+    rasterToRgb01(makeRaster(w, h, () => [g, g, g]));
+
+  const whiteFraction = (idx: Uint16Array) => {
+    let n = 0;
+    for (const v of idx) if (v === 1) n++;
+    return n / idx.length;
+  };
+
+  it("reproduces the local mean on flat grays", () => {
+    for (const g of [64, 128, 192]) {
+      const rgb01 = flatGray(g);
+      const ideal = idealWhiteFraction(g);
+      expect(Math.abs(whiteFraction(knollToPalette(rgb01, 64, 64, BW, 8)) - ideal)).toBeLessThan(0.05);
+      expect(Math.abs(whiteFraction(emaToPalette(rgb01, 64, 64, BW, 8, 64)) - ideal)).toBeLessThan(0.05);
+    }
+  });
+
+  it("mixes BOTH colours of a 2-colour palette on a midtone", () => {
+    const rgb01 = flatGray(128);
+    expect(new Set(knollToPalette(rgb01, 64, 64, BW, 8)).size).toBe(2);
+    expect(new Set(emaToPalette(rgb01, 64, 64, BW, 8)).size).toBe(2);
+  });
+
+  it("snaps to the exact colour when it is already in the palette", () => {
+    const pal: RGB[] = [
+      [0, 0, 0],
+      [255, 255, 255],
+      [200, 30, 40],
+    ];
+    for (let want = 0; want < pal.length; want++) {
+      const rgb01 = rasterToRgb01(makeRaster(16, 16, () => pal[want]));
+      // No spurious mixing: an in-palette colour needs no candidates but itself.
+      expect(new Set(knollToPalette(rgb01, 16, 16, pal, 8))).toEqual(new Set([want]));
+      expect(new Set(emaToPalette(rgb01, 16, 16, pal, 8))).toEqual(new Set([want]));
+    }
+  });
+
+  it("converges toward the true mean as the candidate count N rises", () => {
+    // The article's central claim: N drives reconstruction quality. N is the
+    // knob here precisely because it is decoupled from the matrix size.
+    const rgb01 = flatGray(128);
+    const ideal = idealWhiteFraction(128);
+    const errAt = (N: number) => Math.abs(whiteFraction(emaToPalette(rgb01, 64, 64, BW, 8, N)) - ideal);
+    expect(errAt(64)).toBeLessThan(errAt(8));
+  });
+
+  it("keeps N independent of the threshold-matrix size", () => {
+    // `yliluoma` welds plan length to the matrix (8×8 ⇒ 64 entries); these do not.
+    const rgb01 = flatGray(128);
+    const at = (ms: number) => whiteFraction(emaToPalette(rgb01, 64, 64, BW, ms, 16));
+    for (const ms of [8, 16]) expect(Math.abs(at(ms) - at(4))).toBeLessThan(0.05);
+  });
+
+  it("weakens the mix as Knoll's dither strength drops", () => {
+    // Low strength keeps the goal point hugging the true colour, so fewer
+    // minority-colour pixels get spent — the reason the default is high (0.8)
+    // for the small palettes this studio uses.
+    const rgb01 = flatGray(64);
+    const weak = whiteFraction(knollToPalette(rgb01, 64, 64, BW, 8, undefined, 0.2));
+    const strong = whiteFraction(knollToPalette(rgb01, 64, 64, BW, 8, undefined, 0.8));
+    expect(weak).toBeLessThan(strong);
+    expect(Math.abs(strong - idealWhiteFraction(64))).toBeLessThan(0.05);
+  });
+
+  it("stays in-palette and is deterministic", () => {
+    const w = 24;
+    const h = 18;
+    const raster = makeRaster(w, h, (x, y) => [(x * 9) % 256, (y * 11) % 256, (x * y) % 256]);
+    for (const method of ["knoll", "ema"] as const) {
+      const a = renderToneDither(raster, { colors: 4, palette: "adaptive", method, seed: 5 });
+      const b = renderToneDither(raster, { colors: 4, palette: "adaptive", method, seed: 5 });
+      for (const v of a.indices) expect(v).toBeLessThan(a.palette.length);
+      expect(Array.from(a.indices)).toEqual(Array.from(b.indices));
+    }
+  });
+});
+
+// ── 4e. Serpentine scan + Ostromoukhov variable coefficients ──────────────────
+describe("serpentine error diffusion", () => {
+  const BW: RGB[] = [
+    [0, 0, 0],
+    [255, 255, 255],
+  ];
+
+  it("changes the result versus a fixed left-to-right raster", () => {
+    const rgb01 = rasterToRgb01(makeRaster(48, 48, () => [110, 110, 110]));
+    const snake = errorDiffuseToPalette(rgb01, 48, 48, BW, DIFFUSION_KERNELS.floyd_steinberg, true);
+    const raster = errorDiffuseToPalette(rgb01, 48, 48, BW, DIFFUSION_KERNELS.floyd_steinberg, false);
+    expect(Array.from(snake)).not.toEqual(Array.from(raster));
+  });
+
+  it("preserves overall tone (it reorders error, it does not add any)", () => {
+    // Serpentine must not brighten or darken the image — the whole point is that
+    // it only changes *where* error lands, never how much there is.
+    const rgb01 = rasterToRgb01(makeRaster(64, 64, () => [110, 110, 110]));
+    const frac = (idx: Uint16Array) => {
+      let n = 0;
+      for (const v of idx) if (v === 1) n++;
+      return n / idx.length;
+    };
+    const snake = frac(errorDiffuseToPalette(rgb01, 64, 64, BW, DIFFUSION_KERNELS.floyd_steinberg, true));
+    const raster = frac(errorDiffuseToPalette(rgb01, 64, 64, BW, DIFFUSION_KERNELS.floyd_steinberg, false));
+    expect(Math.abs(snake - raster)).toBeLessThan(0.02);
+  });
+
+  it("reduces row-to-row correlation of the dot pattern", () => {
+    // A fixed raster makes consecutive rows drift in the same direction, which
+    // is what lines the dots up into diagonal worms. Serpentine should leave
+    // neighbouring rows less alike.
+    const w = 96;
+    const h = 96;
+    const rgb01 = rasterToRgb01(makeRaster(w, h, () => [96, 96, 96]));
+    const agreement = (idx: Uint16Array) => {
+      let same = 0;
+      let total = 0;
+      // Compare each row against the next, offset by one column — the direction
+      // a left-to-right F–S kernel preferentially pushes its error.
+      for (let y = 0; y + 1 < h; y++) {
+        for (let x = 0; x + 1 < w; x++) {
+          if (idx[y * w + x] === idx[(y + 1) * w + x + 1]) same++;
+          total++;
+        }
+      }
+      return same / total;
+    };
+    const snake = agreement(errorDiffuseToPalette(rgb01, w, h, BW, DIFFUSION_KERNELS.floyd_steinberg, true));
+    const raster = agreement(errorDiffuseToPalette(rgb01, w, h, BW, DIFFUSION_KERNELS.floyd_steinberg, false));
+    expect(snake).toBeLessThan(raster);
+  });
+});
+
+describe("ostromoukhov variable-coefficient diffusion", () => {
+  const BW: RGB[] = [
+    [0, 0, 0],
+    [255, 255, 255],
+  ];
+
+  it("reproduces tone across the range", () => {
+    for (const g of [32, 96, 160, 224]) {
+      const rgb01 = rasterToRgb01(makeRaster(64, 64, () => [g, g, g]));
+      const idx = ostromoukhovToPalette(rgb01, 64, 64, BW);
+      let white = 0;
+      for (const v of idx) if (v === 1) white++;
+      // Error diffusion conserves tone in sRGB, so the white fraction tracks g.
+      expect(Math.abs(white / idx.length - g / 255)).toBeLessThan(0.05);
+    }
+  });
+
+  it("stays in-palette and is deterministic", () => {
+    const raster = makeRaster(24, 18, (x, y) => [(x * 9) % 256, (y * 11) % 256, (x * y) % 256]);
+    const a = renderToneDither(raster, { colors: 4, palette: "adaptive", method: "ostromoukhov", seed: 5 });
+    const b = renderToneDither(raster, { colors: 4, palette: "adaptive", method: "ostromoukhov", seed: 5 });
+    for (const v of a.indices) expect(v).toBeLessThan(a.palette.length);
+    expect(Array.from(a.indices)).toEqual(Array.from(b.indices));
+  });
+
+  it("uses genuinely level-dependent coefficients", () => {
+    // Guards the Appendix I table: if it were flattened to a single fixed
+    // kernel, light and dark patches would diffuse identically and this would
+    // collapse. Compare against a fixed-kernel run on the same input.
+    const rgb01 = rasterToRgb01(makeRaster(64, 64, (x) => {
+      const g = x < 32 ? 40 : 210; // one dark half, one light half
+      return [g, g, g];
+    }));
+    const ostro = ostromoukhovToPalette(rgb01, 64, 64, BW);
+    const fixed = errorDiffuseToPalette(rgb01, 64, 64, BW, DIFFUSION_KERNELS.floyd_steinberg, true);
+    expect(Array.from(ostro)).not.toEqual(Array.from(fixed));
+  });
+});
+
+describe("IGN and R2 threshold masks", () => {
+  it("produce masks spanning [0,1) with a near-uniform mean", () => {
+    for (const method of ["ign", "r2"] as const) {
+      const raster = makeRaster(64, 64, () => [128, 128, 128]);
+      const res = renderToneDither(raster, {
+        colors: 2, palette: "grayscale", method, seed: 1,
+      });
+      // A well-distributed mask on flat mid-gray splits roughly half and half.
+      let white = 0;
+      for (const v of res.indices) if (v === 1) white++;
+      expect(Math.abs(white / res.indices.length - 0.5)).toBeLessThan(0.12);
+    }
+  });
+
+  it("stay within [0,1) so they are valid thresholds", () => {
+    for (const mask of [ignThresholdMap(64, 64), r2ThresholdMap(64, 64)]) {
+      for (const v of mask) {
+        expect(v).toBeGreaterThanOrEqual(0);
+        expect(v).toBeLessThan(1);
+      }
+    }
+  });
+
+  it("R2's mask has no tile period, where Bayer repeats every matrix width", () => {
+    // The selling point over a tiled mask: no seams at any output size. Assert
+    // it on the MASK, not on quantised output — over a short span R2's drift
+    // (frac(0.7549×8) ≈ 0.04 per 8px) is too small to flip a 2-colour decision,
+    // so the rendered pattern can look periodic even though the mask is not.
+    const W = 256;
+    const r2 = Array.from(r2ThresholdMap(W, 1));
+    const slice = (row: number[], p: number, k: number) => row.slice(k * p, (k + 1) * p).join(",");
+    for (const p of [8, 16, 32, 64]) {
+      expect(slice(r2, p, 0)).not.toEqual(slice(r2, p, 1));
+    }
+  });
+});
+
 // ── 5. Flow mask uses raw gray; palette assignment uses toned RGB ───────────────
 describe("renderToneDither flow split", () => {
   it("computes the flow mask from RAW gray and assigns from TONED rgb", () => {
@@ -378,7 +604,8 @@ describe("renderToneDither", () => {
     const methods = [
       "bayer", "blue_noise", "floyd_steinberg",
       "atkinson", "jarvis", "stucki", "burkes", "sierra",
-      "yliluoma", "flow", "flat",
+      "yliluoma", "knoll", "ema", "flow", "flat",
+      "ign", "r2", "ostromoukhov",
     ] as const;
     for (const method of methods) {
       const res = renderToneDither(raster, { colors: 5, palette: "adaptive", method, seed: 42 });
