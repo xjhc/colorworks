@@ -418,6 +418,9 @@ function toRenderOptions(v: Record<string, ParamValue>): RenderOptions {
       warp: num("warp", 7),
       angleDeg: num("angle_deg", 45),
       detail: num("detail", 2.5),
+      candidates: num("candidates", 0) || undefined, // 0 ⇒ let the renderer pick 2×palette
+      ditherStrength: num("dither_strength", 0.8),
+      serpentine: v.serpentine !== false, // default on
     },
   };
 }

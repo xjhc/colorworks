@@ -68,13 +68,18 @@ export const TONE_DITHER_PARAMS: ParamDef[] = [
     options: [
       { value: "bayer", label: "Ordered (Bayer)" },
       { value: "blue_noise", label: "Blue Noise" },
+      { value: "ign", label: "Interleaved Gradient Noise" },
+      { value: "r2", label: "R2 (golden ratio)" },
       { value: "floyd_steinberg", label: "Floyd–Steinberg" },
       { value: "atkinson", label: "Atkinson" },
       { value: "jarvis", label: "Jarvis–Judice–Ninke" },
       { value: "stucki", label: "Stucki" },
       { value: "burkes", label: "Burkes" },
       { value: "sierra", label: "Sierra" },
+      { value: "ostromoukhov", label: "Ostromoukhov (variable coeff.)" },
       { value: "yliluoma", label: "Yliluoma (palette mix)" },
+      { value: "knoll", label: "Knoll (pattern mix)" },
+      { value: "ema", label: "Yliluoma EMA (exact)" },
       { value: "flow", label: "Flow (waves)" },
       { value: "flat", label: "Flat poster (no dither)" },
     ],
@@ -91,7 +96,49 @@ export const TONE_DITHER_PARAMS: ParamDef[] = [
       { value: 8, label: "8×8" },
       { value: 16, label: "16×16" },
     ],
-    visibleWhen: { param: "method", equals: ["bayer"] },
+    visibleWhen: { param: "method", equals: ["bayer", "knoll", "ema"] },
+  },
+  {
+    key: "serpentine",
+    label: "Serpentine scan",
+    type: "bool",
+    // On by default: a fixed left-to-right raster biases every diffusion kernel
+    // and shows up as diagonal "worms". Turn off to reproduce pre-2026 renders.
+    default: true,
+    group: "pattern",
+    visibleWhen: {
+      param: "method",
+      equals: [
+        "floyd_steinberg", "atkinson", "jarvis", "stucki",
+        "burkes", "sierra", "ostromoukhov",
+      ],
+    },
+  },
+  {
+    key: "candidates",
+    label: "Candidate Searches (N)",
+    type: "int",
+    // 0 = auto: the renderer uses the article's N ≈ 2×palette rule (min 16).
+    // N drives noisiness more than any other knob — raise it if the mix looks grainy.
+    default: 0,
+    min: 0,
+    max: 64,
+    step: 1,
+    group: "pattern",
+    visibleWhen: { param: "method", equals: ["knoll", "ema"] },
+  },
+  {
+    key: "dither_strength",
+    label: "Dither Strength",
+    type: "float",
+    // How far Knoll's goal point roams from the true colour. Low = candidates
+    // hug the original (subtle); high = wider mixing, which small palettes need.
+    default: 0.8,
+    min: 0,
+    max: 1,
+    step: 0.05,
+    group: "pattern",
+    visibleWhen: { param: "method", equals: ["knoll"] },
   },
   {
     key: "noise_size",
@@ -747,6 +794,11 @@ export const STYLES: StyleDef[] = [
   { id: "burkes", label: "Burkes — balanced grain", description: "Two-row diffusion — balanced sharpness and smoothness", fixed: { method: "burkes" } },
   { id: "sierra", label: "Sierra — crisp & smooth", description: "Three-row diffusion — crisp detail with smooth tone", fixed: { method: "sierra" } },
   { id: "yliluoma", label: "Yliluoma — rich colour mix", description: "Gamma-correct ordered dithering that mixes the palette to hit out-of-palette colours — best colour from a small fixed palette", fixed: { method: "yliluoma" } },
+  { id: "ign", label: "Interleaved gradient noise", description: "Fine diagonal gradient texture — between Bayer's grid and blue noise, with no repeating tile", fixed: { method: "ign" } },
+  { id: "r2", label: "R2 — golden-ratio grain", description: "Quasirandom even grain from the plastic-number sequence — never repeats, so no tiling seams at any size", fixed: { method: "r2" } },
+  { id: "ostromoukhov", label: "Ostromoukhov — worm-free diffusion", description: "Variable-coefficient error diffusion: weights retuned per tone level to break up the diagonal worms that fixed kernels leave in highlights and shadows", fixed: { method: "ostromoukhov" } },
+  { id: "knoll", label: "Knoll — Photoshop pattern mix", description: "Thomas Knoll's pattern dither: each pixel picks palette colours that cancel each other's error, so the blend reads as the true colour — the reference-quality N-candidate mix", fixed: { method: "knoll" } },
+  { id: "ema", label: "Yliluoma EMA — exact blend", description: "Yliluoma's palette mixing with the blend factor solved exactly instead of searched — smoother, more faithful colour than the classic Yliluoma at the same palette size", fixed: { method: "ema" } },
   { id: "flat", label: "Flat poster — no dither", description: "Flat N-colour poster", fixed: { method: "flat" } },
   {
     id: "depixelate",

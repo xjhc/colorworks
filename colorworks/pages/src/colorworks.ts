@@ -52,13 +52,18 @@ export interface PinnedColor {
 export type DitherMethod =
   | "bayer"
   | "blue_noise"
+  | "ign"
+  | "r2"
   | "floyd_steinberg"
   | "atkinson"
   | "jarvis"
   | "stucki"
   | "burkes"
   | "sierra"
+  | "ostromoukhov"
   | "yliluoma"
+  | "knoll"
+  | "ema"
   | "flow"
   | "flat";
 
@@ -77,6 +82,9 @@ export interface RenderParams {
   warp?: number; // flow: flow strength
   angleDeg?: number; // flow: base angle
   detail?: number; // flow: warp-field blur radius
+  candidates?: number; // knoll | ema: N candidate search iterations (default 2×palette, min 16)
+  ditherStrength?: number; // knoll: error-compensation scale, 0..1
+  serpentine?: boolean; // error diffusion: alternate scan direction per row (default true)
 }
 
 export interface RenderOptions {
@@ -818,6 +826,44 @@ function bayerThresholdMap(w: number, h: number, matrixSize: number): Float32Arr
   return out;
 }
 
+/**
+ * Interleaved Gradient Noise (Jorge Jimenez, "Next Generation Post Processing
+ * in Call of Duty: Advanced Warfare", SIGGRAPH 2014). A single magic-constant
+ * formula — no tile, no table — whose spectrum sits between Bayer's rigid grid
+ * and true blue noise: fine interleaved diagonal gradients rather than a
+ * repeating cell. Cheap enough to be free, and visually distinct from both
+ * masks already here.
+ */
+export function ignThresholdMap(w: number, h: number): Float32Array {
+  const out = new Float32Array(w * h);
+  const frac = (v: number) => v - Math.floor(v);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      out[y * w + x] = frac(52.9829189 * frac(0.06711056 * x + 0.00583715 * y));
+    }
+  }
+  return out;
+}
+
+/**
+ * R2 low-discrepancy sequence (Martin Roberts, 2018), the 2-D generalisation of
+ * the golden ratio: alpha = 1/phi_2 where phi_2 is the plastic number, the real
+ * root of x^3 = x + 1. Sampling it on the pixel lattice gives an even,
+ * non-repeating quasirandom mask — no tile period at all, so no visible
+ * seams at any output size.
+ */
+const PLASTIC = 1.32471795724474602596; // phi_2
+export function r2ThresholdMap(w: number, h: number): Float32Array {
+  const out = new Float32Array(w * h);
+  const a1 = 1 / PLASTIC;
+  const a2 = 1 / (PLASTIC * PLASTIC);
+  const frac = (v: number) => v - Math.floor(v);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) out[y * w + x] = frac(0.5 + a1 * x + a2 * y);
+  }
+  return out;
+}
+
 const _blueNoiseCache = new Map<number, Float32Array>();
 
 function blueNoiseTile(size: number): { tile: Float32Array; size: number } {
@@ -1016,6 +1062,7 @@ export function errorDiffuseToPalette(
   h: number,
   palette: RGB[],
   kernel: DiffusionKernel,
+  serpentine = true,
 ): Uint16Array {
   const n = palette.length;
   const pal = new Float32Array(n * 3); // sRGB 0..1 (for the diffused residual)
@@ -1032,7 +1079,13 @@ export function errorDiffuseToPalette(
   const inv = 1 / kernel.divisor;
 
   for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
+    // Serpentine (boustrophedon) scan: alternate direction each row and mirror
+    // the kernel's x-offsets to match. A fixed left-to-right raster gives every
+    // kernel a directional bias that shows up as correlated diagonal "worms" in
+    // highlights and shadows; reversing every other row cancels it.
+    const ltr = !serpentine || (y & 1) === 0;
+    for (let k = 0; k < w; k++) {
+      const x = ltr ? k : w - 1 - k;
       const i = y * w + x;
       const r = buf[i * 3];
       const g = buf[i * 3 + 1];
@@ -1064,7 +1117,7 @@ export function errorDiffuseToPalette(
       const eg = g - pal[bj * 3 + 1];
       const eb = b - pal[bj * 3 + 2];
       for (let c = 0; c < cells.length; c++) {
-        const nx = x + cells[c][0];
+        const nx = x + (ltr ? cells[c][0] : -cells[c][0]);
         const ny = y + cells[c][1];
         if (nx < 0 || nx >= w || ny >= h) continue;
         const f = cells[c][2] * inv;
@@ -1091,10 +1144,163 @@ export function fsToPalette(
   return errorDiffuseToPalette(rgb01, w, h, palette, DIFFUSION_KERNELS.floyd_steinberg);
 }
 
+// ── Ostromoukhov variable-coefficient error diffusion ────────────────────────
+/**
+ * Victor Ostromoukhov, "A Simple and Efficient Error-Diffusion Algorithm"
+ * (SIGGRAPH 2001). Every other kernel here is *fixed*: the same weights at every
+ * intensity. That is what makes error diffusion produce correlated diagonal
+ * "worms" in highlights and shadows. Ostromoukhov instead varies the three
+ * coefficients per input level, using values found by offline optimisation of
+ * the output's blue-noise spectrum — so the artifacts cancel where they would
+ * otherwise line up. It uses only 3 taps (vs Floyd–Steinberg's 4), on a
+ * serpentine path, which the paper notes makes it *faster* than F–S too.
+ *
+ * Distribution, matching the paper's Figure 1 (right):
+ *     A10 → (x+1, y)    A-11 → (x-1, y+1)    A01 → (x, y+1)
+ * each divided by M = A10 + A-11 + A01.
+ */
+
+/**
+ * Appendix I of the paper: `A10, A-11, A01` for input levels 0..127, verbatim.
+ * Levels 128..255 come from the paper's stated symmetry D(i) = D(255-i), so
+ * only half the table is stored. These are tuned constants — they are not
+ * derivable, and interpolating or rounding them degrades the spectrum.
+ */
+const OSTROMOUKHOV_HALF = Int32Array.from([
+  13,0,5, 13,0,5, 21,0,10, 7,0,4, 8,0,5, 47,3,28, 23,3,13, 15,3,8,
+  22,6,11, 43,15,20, 7,3,3, 501,224,211, 249,116,103, 165,80,67, 123,62,49, 489,256,191,
+  81,44,31, 483,272,181, 60,35,22, 53,32,19, 237,148,83, 471,304,161, 3,2,1, 481,314,185,
+  354,226,155, 1389,866,685, 227,138,125, 267,158,163, 327,188,220, 61,34,45, 627,338,505, 1227,638,1075,
+  20,10,19, 1937,1000,1767, 977,520,855, 657,360,551, 71,40,57, 2005,1160,1539, 337,200,247, 2039,1240,1425,
+  257,160,171, 691,440,437, 1045,680,627, 301,200,171, 177,120,95, 2141,1480,1083, 1079,760,513, 725,520,323,
+  137,100,57, 2209,1640,855, 53,40,19, 2243,1720,741, 565,440,171, 759,600,209, 1147,920,285, 2311,1880,513,
+  97,80,19, 335,280,57, 1181,1000,171, 793,680,95, 599,520,57, 2413,2120,171, 405,360,19, 2447,2200,57,
+  11,10,0, 158,151,3, 178,179,7, 1030,1091,63, 248,277,21, 318,375,35, 458,571,63, 878,1159,147,
+  5,7,1, 172,181,37, 97,76,22, 72,41,17, 119,47,29, 4,1,1, 4,1,1, 4,1,1,
+  4,1,1, 4,1,1, 4,1,1, 4,1,1, 4,1,1, 4,1,1, 65,18,17, 95,29,26,
+  185,62,53, 30,11,9, 35,14,11, 85,37,28, 55,26,19, 80,41,29, 155,86,59, 5,3,2,
+  5,3,2, 5,3,2, 5,3,2, 5,3,2, 5,3,2, 5,3,2, 5,3,2, 5,3,2,
+  5,3,2, 5,3,2, 5,3,2, 5,3,2, 305,176,119, 155,86,59, 105,56,39, 80,41,29,
+  65,32,23, 55,26,19, 335,152,113, 85,37,28, 115,48,37, 35,14,11, 355,136,109, 30,11,9,
+  365,128,107, 185,62,53, 25,8,7, 95,29,26, 385,112,103, 65,18,17, 395,104,101, 4,1,1,
+]);
+
+/** Full 0..255 table as normalized fractions, mirrored via D(i) = D(255-i). */
+const OSTROMOUKHOV_COEFFS: Float32Array = (() => {
+  const t = new Float32Array(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const src = (i < 128 ? i : 255 - i) * 3;
+    const a = OSTROMOUKHOV_HALF[src];
+    const b = OSTROMOUKHOV_HALF[src + 1];
+    const c = OSTROMOUKHOV_HALF[src + 2];
+    const m = a + b + c;
+    t[i * 3] = a / m;
+    t[i * 3 + 1] = b / m;
+    t[i * 3 + 2] = c / m;
+  }
+  return t;
+})();
+
+/**
+ * Render `rgb01` against `palette` with Ostromoukhov's variable-coefficient
+ * error diffusion.
+ *
+ * NOTE the published coefficients are indexed by *grayscale* intensity, since
+ * the algorithm was designed for bilevel halftoning. For an N-colour palette we
+ * index by the luma of the error-adjusted pixel, which preserves the intended
+ * per-level behaviour along the tone axis. That is an adaptation, not something
+ * the paper specifies.
+ */
+export function ostromoukhovToPalette(
+  rgb01: Float32Array,
+  w: number,
+  h: number,
+  palette: RGB[],
+  serpentine = true,
+): Uint16Array {
+  const n = palette.length;
+  const pal = new Float32Array(n * 3);
+  for (let j = 0; j < n; j++) {
+    pal[j * 3] = palette[j][0] / 255;
+    pal[j * 3 + 1] = palette[j][1] / 255;
+    pal[j * 3 + 2] = palette[j][2] / 255;
+  }
+  const palLab = paletteToOklab(palette);
+  const buf = Float32Array.from(rgb01);
+  const out = new Uint16Array(w * h);
+  const lab = new Float32Array(3);
+
+  for (let y = 0; y < h; y++) {
+    const ltr = !serpentine || (y & 1) === 0;
+    for (let k = 0; k < w; k++) {
+      const x = ltr ? k : w - 1 - k;
+      const i = y * w + x;
+      const r = buf[i * 3];
+      const g = buf[i * 3 + 1];
+      const b = buf[i * 3 + 2];
+      const cr = r < 0 ? 0 : r > 1 ? 1 : r;
+      const cg = g < 0 ? 0 : g > 1 ? 1 : g;
+      const cb = b < 0 ? 0 : b > 1 ? 1 : b;
+
+      srgbToOklabInto(cr, cg, cb, lab, 0);
+      let bj = 0;
+      let best = Infinity;
+      for (let j = 0; j < n; j++) {
+        const dL = lab[0] - palLab[j * 3];
+        const dA = lab[1] - palLab[j * 3 + 1];
+        const dB = lab[2] - palLab[j * 3 + 2];
+        const dd = dL * dL + dA * dA + dB * dB;
+        if (dd < best) {
+          best = dd;
+          bj = j;
+        }
+      }
+      out[i] = bj;
+
+      // Coefficients follow the tone of the pixel being diffused.
+      const level = clampByte(luma(cr, cg, cb) * 255);
+      const f10 = OSTROMOUKHOV_COEFFS[level * 3];
+      const f11 = OSTROMOUKHOV_COEFFS[level * 3 + 1];
+      const f01 = OSTROMOUKHOV_COEFFS[level * 3 + 2];
+
+      const er = r - pal[bj * 3];
+      const eg = g - pal[bj * 3 + 1];
+      const eb = b - pal[bj * 3 + 2];
+      // Taps are inlined rather than pushed through a helper: this is the hot
+      // loop, and a per-pixel closure costs more than the tap it saves over F–S.
+      const dx = ltr ? 1 : -1;
+      const ahead = x + dx; // A10  → next pixel on the scan path
+      if (ahead >= 0 && ahead < w) {
+        const ni = (y * w + ahead) * 3;
+        buf[ni] += er * f10;
+        buf[ni + 1] += eg * f10;
+        buf[ni + 2] += eb * f10;
+      }
+      const y1 = y + 1;
+      if (y1 < h) {
+        const behind = x - dx; // A-11 → "behind" on the row below
+        if (behind >= 0 && behind < w) {
+          const ni = (y1 * w + behind) * 3;
+          buf[ni] += er * f11;
+          buf[ni + 1] += eg * f11;
+          buf[ni + 2] += eb * f11;
+        }
+        const ni = (y1 * w + x) * 3; // A01 → directly below
+        buf[ni] += er * f01;
+        buf[ni + 1] += eg * f01;
+        buf[ni + 2] += eb * f01;
+      }
+    }
+  }
+  return out;
+}
+
 // ── Yliluoma positional dithering (gamma-correct palette mixing) ──────────────
 /**
- * Joel Yliluoma's arbitrary-palette positional dithering (algorithm 2, the
- * Knoll-style variant), gamma-corrected. Unlike ordered/Bayer dithering — which
+ * Joel Yliluoma's arbitrary-palette positional dithering — algorithm 2 in its
+ * simple published form, with algorithm 3's gamma-correct mixing. (It is *not*
+ * Knoll's algorithm, which compensates error rather than averaging; see
+ * `knollToPalette` below for that one.) Unlike ordered/Bayer dithering — which
  * snaps each pixel to one of its two nearest palette colours — this builds a
  * per-colour "mixing plan": the set of palette entries whose *linear-light
  * average* best approximates the true colour. A Bayer index then selects which
@@ -1143,6 +1349,11 @@ function colorCompare(
  * approximates the gamma-space target colour, greedily (add the colour that
  * most improves the running average each step), then sort by luma so the Bayer
  * index walks the plan dark→light.
+ *
+ * NOTE this adds exactly one copy per step. Yliluoma's own C++ additionally
+ * searches a *run length* (how many copies of a candidate to commit at once),
+ * which can escape steps where no single addition helps. `emaToPalette` is the
+ * modern take on that search; this stays the simple published form.
  */
 function deviseMixingPlan(
   tr: number, tg: number, tb: number,
@@ -1234,6 +1445,307 @@ export function yliluomaToPalette(
   return out;
 }
 
+// ── N-candidate ordered dithering: Knoll + Yliluoma-EMA ──────────────────────
+/**
+ * Two "N-candidate" ordered dithers, following Pekka Väänänen's analysis of
+ * Yliluoma's algorithms (https://30fps.net/pages/revisiting-yliluoma-2/).
+ *
+ * Both share a shape with `yliluoma` above: per pixel, collect N weighted
+ * candidate palette colours whose weighted mean approximates the true colour,
+ * then let a Bayer threshold pick which candidate shows. They differ in how
+ * candidates are found, and in two structural ways:
+ *
+ *   - They work in a perceptually pre-weighted sRGB space (see `liqWeight`)
+ *     where plain squared Euclidean distance is already a good colour metric.
+ *     That removes the need for a luma-weighted difference formula — and for
+ *     `ema`, it is what makes the mixing factor solvable in closed form.
+ *   - Candidates carry *weights* rather than filling plan slots directly, so N
+ *     is decoupled from the matrix size. `yliluoma` welds them together
+ *     (an 8×8 matrix forces a 64-entry plan); here an 8×8 matrix can run N=16.
+ *
+ * Note these mix in the (pre-weighted) gamma domain, where the article's
+ * constants were tuned — NOT in linear light like `yliluoma`. That is a
+ * deliberate difference, and the two look different in the midtones.
+ */
+
+/**
+ * libimagequant-style perceptual pre-weighting: raise each channel to a fixed
+ * exponent, then scale so green dominates and blue is discounted. Applied to
+ * BOTH image and palette. Only colour *choice* happens in this space — the
+ * original palette is still what gets drawn — so it never shifts output colour.
+ *
+ * NOTE the source article's prose says "power of 0.8" while its reference
+ * script uses 0.57/0.45455 ≈ 1.254; those are reciprocals of each other. We
+ * follow the script, being the runnable artifact.
+ */
+const LIQ_EXPONENT = 0.57 / 0.45455;
+const LIQ_WEIGHTS: RGB = [0.5, 1.0, 0.45];
+
+/** Write the pre-weighted form of one [0,1] rgb triple into `out` at `o`. */
+function liqWeight(out: Float32Array, o: number, r: number, g: number, b: number): void {
+  const cr = r < 0 ? 0 : r > 1 ? 1 : r; // pow() of a negative is NaN — tone can overshoot
+  const cg = g < 0 ? 0 : g > 1 ? 1 : g;
+  const cb = b < 0 ? 0 : b > 1 ? 1 : b;
+  out[o] = Math.pow(cr, LIQ_EXPONENT) * LIQ_WEIGHTS[0];
+  out[o + 1] = Math.pow(cg, LIQ_EXPONENT) * LIQ_WEIGHTS[1];
+  out[o + 2] = Math.pow(cb, LIQ_EXPONENT) * LIQ_WEIGHTS[2];
+}
+
+/**
+ * Poynton luma weights, used to order the palette dark→light. The reference
+ * prefers these over Yliluoma's Rec.601 as better balanced.
+ */
+const POYNTON: RGB = [0.309, 0.609, 0.082];
+
+/** Palette prepared for candidate search: pre-weighted colours + luma ordering. */
+interface CandidateCtx {
+  /** Palette in the pre-weighted space, packed as rgb triples. */
+  pw: Float32Array;
+  /** Palette indices sorted dark→light. */
+  order: Uint16Array;
+  n: number;
+}
+
+function candidateCtx(palette: RGB[]): CandidateCtx {
+  const n = palette.length;
+  const pw = new Float32Array(n * 3);
+  const lum = new Float32Array(n);
+  for (let j = 0; j < n; j++) {
+    const r = clampByte(palette[j][0]);
+    const g = clampByte(palette[j][1]);
+    const b = clampByte(palette[j][2]);
+    liqWeight(pw, j * 3, r / 255, g / 255, b / 255);
+    lum[j] = POYNTON[0] * r + POYNTON[1] * g + POYNTON[2] * b;
+  }
+  const order = Uint16Array.from(
+    Array.from({ length: n }, (_, j) => j).sort((a, b) => lum[a] - lum[b]),
+  );
+  return { pw, order, n };
+}
+
+/** Index of the pre-weighted palette colour closest to (r,g,b) by squared distance. */
+function closestWeighted(
+  pw: Float32Array, n: number, r: number, g: number, b: number,
+): number {
+  let best = 0;
+  let bestD = Infinity;
+  for (let j = 0; j < n; j++) {
+    const dr = r - pw[j * 3];
+    const dg = g - pw[j * 3 + 1];
+    const db = b - pw[j * 3 + 2];
+    const d = dr * dr + dg * dg + db * db;
+    if (d < bestD) {
+      bestD = d;
+      best = j;
+    }
+  }
+  return best;
+}
+
+/**
+ * Collapse per-palette candidate weights (summing to 1) into a `mixSize`-slot
+ * plan ordered dark→light: slot `s` holds the palette index at which the
+ * cumulative weight first exceeds `(s + 0.5) / mixSize`.
+ *
+ * This is exactly the reference's per-pixel "walk the luma order until the
+ * cumulative sum crosses the Bayer threshold" loop, precomputed once per unique
+ * colour — the Bayer values are themselves `(v + 0.5) / mixSize`, so slot
+ * `floor(bayer × mixSize)` selects the same entry that loop would. Unused
+ * palette entries have weight 0 and are stepped over without ever being picked.
+ */
+function weightsToPlan(
+  weights: Float32Array, order: Uint16Array, n: number, mixSize: number,
+): Uint16Array {
+  const plan = new Uint16Array(mixSize);
+  let cum = 0;
+  let oi = 0;
+  let idx = order[n - 1];
+  for (let s = 0; s < mixSize; s++) {
+    // Thresholds ascend, so this walk advances monotonically across all slots.
+    while (oi < n) {
+      const cand = order[oi];
+      if (cum + weights[cand] > (s + 0.5) / mixSize) {
+        idx = cand;
+        break;
+      }
+      cum += weights[cand];
+      oi++;
+    }
+    if (oi >= n) idx = order[n - 1]; // float slop only; weights sum to 1
+    plan[s] = idx;
+  }
+  return plan;
+}
+
+/** Resolve the shared knobs both N-candidate dithers take. */
+function candidateSetup(palette: RGB[], matrixSize: number, candidates: number | undefined) {
+  const ctx = candidateCtx(palette);
+  const ms = [2, 4, 8, 16].includes(matrixSize) ? matrixSize : 8;
+  // The article's rule of thumb is N ≈ 2K; a floor of 16 keeps small palettes
+  // (K=2..4, our common case) from looking blocky.
+  const fallback = Math.max(16, 2 * ctx.n);
+  const N = Math.max(2, Math.min(128, Math.floor(candidates ?? fallback)));
+  return { ...ctx, ms, mixSize: ms * ms, bayer: bayerMatrix(ms), N };
+}
+
+/**
+ * Thomas Knoll's pattern dither (the one in Photoshop), as described by
+ * Väänänen — the article's state-of-the-art reference point.
+ *
+ * Per pixel it walks a goal point around the true colour: take the closest
+ * palette entry to the goal, tally it, then push the goal by the error that
+ * entry left behind, so the next pick compensates (too blue ⇒ next is
+ * yellowish). After N rounds the tally *is* the candidate distribution.
+ * `ditherStrength` scales that push: low values keep candidates hugging the
+ * true colour (weak dither), high values roam wider (strong mixing).
+ */
+export function knollToPalette(
+  rgb01: Float32Array,
+  w: number,
+  h: number,
+  palette: RGB[],
+  matrixSize = 8,
+  candidates?: number,
+  ditherStrength = 0.8,
+): Uint16Array {
+  const { pw, order, n, ms, mixSize, bayer, N } = candidateSetup(palette, matrixSize, candidates);
+  const strength = ditherStrength < 0 ? 0 : ditherStrength > 1 ? 1 : ditherStrength;
+  const out = new Uint16Array(w * h);
+  const cache = new Map<number, Uint16Array>();
+  const weights = new Float32Array(n);
+  const target = new Float32Array(3);
+
+  for (let y = 0; y < h; y++) {
+    const brow = bayer[y % ms];
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const qr = clampByte(rgb01[i * 3] * 255);
+      const qg = clampByte(rgb01[i * 3 + 1] * 255);
+      const qb = clampByte(rgb01[i * 3 + 2] * 255);
+      const key = ((qr >> 2) << 12) | ((qg >> 2) << 6) | (qb >> 2);
+      let plan = cache.get(key);
+      if (!plan) {
+        liqWeight(target, 0, qr / 255, qg / 255, qb / 255);
+        weights.fill(0);
+        let er = 0;
+        let eg = 0;
+        let eb = 0;
+        for (let it = 0; it < N; it++) {
+          const j = closestWeighted(
+            pw, n,
+            target[0] + er * strength,
+            target[1] + eg * strength,
+            target[2] + eb * strength,
+          );
+          weights[j] += 1;
+          er += target[0] - pw[j * 3];
+          eg += target[1] - pw[j * 3 + 1];
+          eb += target[2] - pw[j * 3 + 2];
+        }
+        for (let j = 0; j < n; j++) weights[j] /= N;
+        plan = weightsToPlan(weights, order, n, mixSize);
+        cache.set(key, plan);
+      }
+      out[i] = plan[Math.min(mixSize - 1, Math.floor(brow[x % ms] * mixSize))];
+    }
+  }
+  return out;
+}
+
+/**
+ * Yliluoma-2 recast as Väänänen's "EMA-Exact" variant.
+ *
+ * The candidate set is built as an exponential moving average: the running mean
+ * starts at the closest palette colour, and each round picks the palette entry
+ * whose blend with that mean lands nearest the true colour. Because the metric
+ * is Euclidean in the pre-weighted space, the best blend factor `t` along each
+ * segment has a closed form (project the target onto it) instead of needing the
+ * original's parameter sweep — same result, one test per colour instead of 8+.
+ *
+ * `t` is clamped: 0 would leave the mean untouched, 1 would discard it wholly.
+ * The 0.2 floor is the article's empirical pick — the unclamped optimum sits at
+ * ~0 about 97% of the time, which stalls the walk.
+ */
+const EMA_MIN_T = 0.2;
+const EMA_MAX_T = 0.975;
+
+export function emaToPalette(
+  rgb01: Float32Array,
+  w: number,
+  h: number,
+  palette: RGB[],
+  matrixSize = 8,
+  candidates?: number,
+): Uint16Array {
+  const { pw, order, n, ms, mixSize, bayer, N } = candidateSetup(palette, matrixSize, candidates);
+  const out = new Uint16Array(w * h);
+  const cache = new Map<number, Uint16Array>();
+  const weights = new Float32Array(n);
+  const target = new Float32Array(3);
+
+  for (let y = 0; y < h; y++) {
+    const brow = bayer[y % ms];
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const qr = clampByte(rgb01[i * 3] * 255);
+      const qg = clampByte(rgb01[i * 3 + 1] * 255);
+      const qb = clampByte(rgb01[i * 3 + 2] * 255);
+      const key = ((qr >> 2) << 12) | ((qg >> 2) << 6) | (qb >> 2);
+      let plan = cache.get(key);
+      if (!plan) {
+        liqWeight(target, 0, qr / 255, qg / 255, qb / 255);
+        const pr = target[0];
+        const pg = target[1];
+        const pb = target[2];
+        weights.fill(0);
+        const seed = closestWeighted(pw, n, pr, pg, pb);
+        weights[seed] = 1;
+        let mr = pw[seed * 3];
+        let mg = pw[seed * 3 + 1];
+        let mb = pw[seed * 3 + 2];
+
+        for (let it = 0; it < N; it++) {
+          let bestK = 0;
+          let bestT = EMA_MIN_T;
+          let bestD = Infinity;
+          for (let k = 0; k < n; k++) {
+            const dr = pw[k * 3] - mr;
+            const dg = pw[k * 3 + 1] - mg;
+            const db = pw[k * 3 + 2] - mb;
+            const d2 = dr * dr + dg * dg + db * db;
+            // t = ((p − mean) · delta) / ‖delta‖², clamped to the usable range.
+            let t = 0;
+            if (d2 >= 1e-9) t = ((pr - mr) * dr + (pg - mg) * dg + (pb - mb) * db) / d2;
+            t = t < EMA_MIN_T ? EMA_MIN_T : t > EMA_MAX_T ? EMA_MAX_T : t;
+            const xr = pr - (mr + t * dr);
+            const xg = pg - (mg + t * dg);
+            const xb = pb - (mb + t * db);
+            const d = xr * xr + xg * xg + xb * xb;
+            if (d < bestD) {
+              bestD = d;
+              bestK = k;
+              bestT = t;
+            }
+          }
+          weights[bestK] += bestT;
+          mr += bestT * (pw[bestK * 3] - mr);
+          mg += bestT * (pw[bestK * 3 + 1] - mg);
+          mb += bestT * (pw[bestK * 3 + 2] - mb);
+        }
+
+        let sum = 0;
+        for (let j = 0; j < n; j++) sum += weights[j];
+        if (sum < 1e-6) sum = 1e-6;
+        for (let j = 0; j < n; j++) weights[j] /= sum;
+        plan = weightsToPlan(weights, order, n, mixSize);
+        cache.set(key, plan);
+      }
+      out[i] = plan[Math.min(mixSize - 1, Math.floor(brow[x % ms] * mixSize))];
+    }
+  }
+  return out;
+}
+
 // ── Dedupe + reindex ──────────────────────────────────────────────────────────
 /**
  * Collapse duplicate palette swatches and reindex the cell map accordingly.
@@ -1265,9 +1777,9 @@ export function dedupePalette(
 
 // ── Top-level render ──────────────────────────────────────────────────────────
 const METHODS: DitherMethod[] = [
-  "bayer", "blue_noise", "floyd_steinberg",
+  "bayer", "blue_noise", "ign", "r2", "floyd_steinberg",
   "atkinson", "jarvis", "stucki", "burkes", "sierra",
-  "yliluoma", "flow", "flat",
+  "ostromoukhov", "yliluoma", "knoll", "ema", "flow", "flat",
 ];
 const MODES: PaletteMode[] = ["grayscale", "adaptive", "duotone"];
 
@@ -1307,8 +1819,18 @@ export function renderToneDither(raster: Raster, opts: RenderOptions = {}): Rend
   let indices: Uint16Array;
   if (method === "yliluoma") {
     indices = yliluomaToPalette(rgb01, w, h, palette, p.matrixSize ?? 8);
+  } else if (method === "ostromoukhov") {
+    indices = ostromoukhovToPalette(rgb01, w, h, palette, p.serpentine ?? true);
+  } else if (method === "knoll") {
+    indices = knollToPalette(
+      rgb01, w, h, palette, p.matrixSize ?? 8, p.candidates, p.ditherStrength ?? 0.8,
+    );
+  } else if (method === "ema") {
+    indices = emaToPalette(rgb01, w, h, palette, p.matrixSize ?? 8, p.candidates);
   } else if (method in DIFFUSION_KERNELS) {
-    indices = errorDiffuseToPalette(rgb01, w, h, palette, DIFFUSION_KERNELS[method]);
+    indices = errorDiffuseToPalette(
+      rgb01, w, h, palette, DIFFUSION_KERNELS[method], p.serpentine ?? true,
+    );
   } else {
     let mask: Float32Array | null;
     if (method === "flat") {
@@ -1325,6 +1847,10 @@ export function renderToneDither(raster: Raster, opts: RenderOptions = {}): Rend
       );
     } else if (method === "blue_noise") {
       mask = blueNoiseThresholdMap(w, h, p.noiseSize ?? 64);
+    } else if (method === "ign") {
+      mask = ignThresholdMap(w, h);
+    } else if (method === "r2") {
+      mask = r2ThresholdMap(w, h);
     } else {
       mask = bayerThresholdMap(w, h, p.matrixSize ?? 8);
     }
