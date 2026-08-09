@@ -43,7 +43,7 @@ export const TONE_DITHER_PARAMS: ParamDef[] = [
     type: "int",
     default: 4,
     min: 2,
-    max: 8,
+    max: 16,
     step: 1,
     group: "palette",
   },
@@ -57,6 +57,7 @@ export const TONE_DITHER_PARAMS: ParamDef[] = [
       { value: "adaptive", label: "Adaptive (from image)" },
       { value: "grayscale", label: "Grayscale" },
       { value: "duotone", label: "Duotone (ink → paper)" },
+      { value: "custom", label: "Exact custom inks" },
     ],
   },
   {
@@ -236,6 +237,38 @@ export const TONE_DITHER_PARAMS: ParamDef[] = [
     uiHint: "color",
     visibleWhen: { param: "palette", equals: ["duotone"] },
   },
+];
+
+export const HALFTONE_PARAMS: ParamDef[] = [
+  {
+    key: "separation", label: "Plates", type: "str", default: "spot", group: "palette",
+    options: [
+      { value: "spot", label: "Single spot ink" },
+      { value: "cmyk", label: "CMYK process" },
+    ],
+  },
+  {
+    key: "screen", label: "Screen", type: "str", default: "am", group: "pattern",
+    options: [
+      { value: "am", label: "AM · dot size" },
+      { value: "fm", label: "FM · dot frequency" },
+      { value: "hybrid", label: "Hybrid · broken rosette" },
+    ],
+  },
+  { key: "cell", label: "Screen cell (px)", type: "int", default: 8, min: 2, max: 24, step: 1, group: "pattern" },
+  {
+    key: "dot_shape", label: "Dot shape", type: "str", default: "round", group: "pattern",
+    options: [
+      { value: "round", label: "Round" },
+      { value: "square", label: "Square" },
+      { value: "line", label: "Line" },
+    ],
+    visibleWhen: { param: "screen", equals: ["am", "hybrid"] },
+  },
+  { key: "angle", label: "Spot angle (deg)", type: "float", default: 45, min: 0, max: 180, step: 1, group: "pattern", visibleWhen: { param: "separation", equals: ["spot"] } },
+  { key: "dot_gain", label: "Dot gain", type: "float", default: 0, min: -0.2, max: 0.2, step: 0.01, group: "tone" },
+  { key: "ink_color", label: "Spot ink", type: "str", default: "#1c1712", group: "palette", uiHint: "color", visibleWhen: { param: "separation", equals: ["spot"] } },
+  { key: "paper_color", label: "Paper", type: "str", default: "#f4ebd9", group: "palette", uiHint: "color" },
 ];
 
 /** Depixelate params (mirror of depixelate.py DEFINITION.parameters). */
@@ -768,12 +801,14 @@ export const KNIT_PARAMS: ParamDef[] = [
   },
 ];
 
-export type RendererId = "tone_dither" | "depixelate" | "repixel" | "block_mosaic" | "knit";
+export type RendererId = "tone_dither" | "halftone" | "depixelate" | "repixel" | "block_mosaic" | "knit";
+export type StyleIntent = "faithful" | "organic" | "ordered" | "print" | "specialty";
 
 export interface StyleDef {
   id: string;
   label: string;
   description: string;
+  intent: StyleIntent;
   /** Which renderer this style drives (defaults to tone_dither). */
   renderer?: RendererId;
   /** Which param set this style exposes (defaults to TONE_DITHER_PARAMS). */
@@ -784,26 +819,28 @@ export interface StyleDef {
 
 /** Curated style set (mirrors quick_mode.CANDIDATES + the studio style picker). */
 export const STYLES: StyleDef[] = [
-  { id: "flow", label: "Flow — flowing waves", description: "Waves that flow around the subject", fixed: { method: "flow" } },
-  { id: "bayer", label: "Ordered — Bayer grid", description: "Crisp grid dither across N tones", fixed: { method: "bayer" } },
-  { id: "blue_noise", label: "Blue noise — grain", description: "Organic, grain-like dither", fixed: { method: "blue_noise" } },
-  { id: "floyd_steinberg", label: "Floyd–Steinberg — fine grain", description: "Error-diffused, fine texture", fixed: { method: "floyd_steinberg" } },
-  { id: "atkinson", label: "Atkinson — sparse, high-contrast", description: "Sparse, punchy error diffusion that keeps clean midtones — the classic Macintosh look", fixed: { method: "atkinson" } },
-  { id: "jarvis", label: "Jarvis–Judice–Ninke — softest gradients", description: "Wide diffusion — the smoothest, softest tonal gradients", fixed: { method: "jarvis" } },
-  { id: "stucki", label: "Stucki — smooth & clean", description: "Wide diffusion, clean and low-grain", fixed: { method: "stucki" } },
-  { id: "burkes", label: "Burkes — balanced grain", description: "Two-row diffusion — balanced sharpness and smoothness", fixed: { method: "burkes" } },
-  { id: "sierra", label: "Sierra — crisp & smooth", description: "Three-row diffusion — crisp detail with smooth tone", fixed: { method: "sierra" } },
-  { id: "yliluoma", label: "Yliluoma — rich colour mix", description: "Gamma-correct ordered dithering that mixes the palette to hit out-of-palette colours — best colour from a small fixed palette", fixed: { method: "yliluoma" } },
-  { id: "ign", label: "Interleaved gradient noise", description: "Fine diagonal gradient texture — between Bayer's grid and blue noise, with no repeating tile", fixed: { method: "ign" } },
-  { id: "r2", label: "R2 — golden-ratio grain", description: "Quasirandom even grain from the plastic-number sequence — never repeats, so no tiling seams at any size", fixed: { method: "r2" } },
-  { id: "ostromoukhov", label: "Ostromoukhov — worm-free diffusion", description: "Variable-coefficient error diffusion: weights retuned per tone level to break up the diagonal worms that fixed kernels leave in highlights and shadows", fixed: { method: "ostromoukhov" } },
-  { id: "knoll", label: "Knoll — Photoshop pattern mix", description: "Thomas Knoll's pattern dither: each pixel picks palette colours that cancel each other's error, so the blend reads as the true colour — the reference-quality N-candidate mix", fixed: { method: "knoll" } },
-  { id: "ema", label: "Yliluoma EMA — exact blend", description: "Yliluoma's palette mixing with the blend factor solved exactly instead of searched — smoother, more faithful colour than the classic Yliluoma at the same palette size", fixed: { method: "ema" } },
-  { id: "flat", label: "Flat poster — no dither", description: "Flat N-colour poster", fixed: { method: "flat" } },
+  { id: "knoll", label: "Knoll — faithful palette mix", description: "Stable ordered mixing for a small fixed palette", intent: "faithful", fixed: { method: "knoll" } },
+  { id: "yliluoma", label: "Yliluoma — gamma-aware mix", description: "Ordered palette mixing in linear light", intent: "faithful", fixed: { method: "yliluoma" } },
+  { id: "ema", label: "Yliluoma EMA — exact blend", description: "Experimental exact-segment palette mixing", intent: "faithful", fixed: { method: "ema" } },
+  { id: "flat", label: "Flat poster — no dither", description: "Nearest-color assignment without texture", intent: "faithful", fixed: { method: "flat" } },
+  { id: "floyd_steinberg", label: "Floyd–Steinberg — fine grain", description: "Balanced error-diffused texture", intent: "organic", fixed: { method: "floyd_steinberg" } },
+  { id: "blue_noise", label: "Blue noise — even grain", description: "Organic-looking grain without diffusion trails", intent: "organic", fixed: { method: "blue_noise" } },
+  { id: "atkinson", label: "Atkinson — sparse contrast", description: "Punchy, sparse Macintosh-style grain", intent: "organic", fixed: { method: "atkinson" } },
+  { id: "jarvis", label: "Jarvis–Judice–Ninke — wide diffusion", description: "Soft gradients from a wide error kernel", intent: "organic", fixed: { method: "jarvis" } },
+  { id: "stucki", label: "Stucki — clean diffusion", description: "Wide, restrained error diffusion", intent: "organic", fixed: { method: "stucki" } },
+  { id: "burkes", label: "Burkes — balanced diffusion", description: "Two-row balance of edge detail and grain", intent: "organic", fixed: { method: "burkes" } },
+  { id: "sierra", label: "Sierra — crisp diffusion", description: "Three-row diffusion with retained edges", intent: "organic", fixed: { method: "sierra" } },
+  { id: "ostromoukhov", label: "Ostromoukhov — tone-aware diffusion", description: "Variable coefficients reduce recurring worms", intent: "organic", fixed: { method: "ostromoukhov" } },
+  { id: "bayer", label: "Ordered — Bayer grid", description: "Crisp, repeatable threshold pattern", intent: "ordered", fixed: { method: "bayer" } },
+  { id: "flow", label: "Flow — image-warped waves", description: "Graphic bands that bend around the subject", intent: "ordered", fixed: { method: "flow" } },
+  { id: "ign", label: "Interleaved gradient noise", description: "Fine diagonal structure without a stored tile", intent: "ordered", fixed: { method: "ign" } },
+  { id: "r2", label: "R2 — quasirandom grain", description: "Non-repeating golden-ratio threshold sequence", intent: "ordered", fixed: { method: "r2" } },
+  { id: "halftone", label: "Print screen — spot or CMYK", description: "AM, FM, or hybrid print screens with visible plates", intent: "print", renderer: "halftone", params: HALFTONE_PARAMS, fixed: {} },
   {
     id: "depixelate",
     label: "Depixelate — recover grid",
     description: "Recover the native pixel grid of an upscaled image; re-render each cell as a 2-colour dither tile",
+    intent: "specialty",
     renderer: "depixelate",
     params: DEPIXELATE_PARAMS,
     fixed: {},
@@ -813,6 +850,7 @@ export const STYLES: StyleDef[] = [
     label: "Block mosaic — tile from blocks",
     description:
       "Fill the image with multi-colour block tiles — preset blocks built from the palette plus learned blocks discovered from the image; best block wins per region",
+    intent: "specialty",
     renderer: "block_mosaic",
     params: BLOCK_MOSAIC_PARAMS,
     // `method` is left as a visible knob (the match↔diffuse toggle).
@@ -823,6 +861,7 @@ export const STYLES: StyleDef[] = [
     label: "Knit chart — stranded colorwork",
     description:
       "Turn the image into a knitting chart: 1 pixel = 1 stitch, quantised to a few yarns and dithered so flat tones become salt-and-pepper colorwork and solid shapes become solid runs; gauge-corrected rows, baked grid, and a yarn legend",
+    intent: "specialty",
     renderer: "knit",
     params: KNIT_PARAMS,
     fixed: {},
@@ -843,6 +882,7 @@ export function styleParams(style: StyleDef): ParamDef[] {
 export const PARAM_BY_KEY: Record<string, ParamDef> = Object.fromEntries(
   [
     ...TONE_DITHER_PARAMS,
+    ...HALFTONE_PARAMS,
     ...DEPIXELATE_PARAMS,
     ...REPIXEL_PARAMS,
     ...BLOCK_MOSAIC_PARAMS,

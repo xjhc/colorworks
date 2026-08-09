@@ -71,13 +71,16 @@ The intended loop is:
 1. **Upload an image** — click the source tile on the left.
 2. **Set the output size** — `Max width`, optional `Max height`, and `Fit` /
    `Cover` / `Stretch`. Blank means use the source dimensions.
-3. **Set the color count** — 2 to 8. Default 4. Pick `Adaptive` or `Grayscale`
-   for the palette source.
+3. **Set the color count** — 2 to 16. Default 4. Pick `Adaptive`, `Grayscale`,
+   `Duotone`, or supply an exact custom ink palette.
 4. **Optionally filter by style** — All, Dither, Pattern, Halftone, Stipple.
 5. **Generate variants** — every compatible algorithm runs in parallel and
    returns a thumbnail.
-6. **Pick a card** — that's your output. `Export PNG` writes it out, or click
-   `Refine in Studio` to fine-tune.
+6. **Pick a rendering intent** — faithful palette, organic grain, graphic
+   pattern, or print screen — then fine-tune the method if needed.
+7. **Read the proof strip** — perceptual and low-frequency error, actual used
+   colours, plate angles, and encoded PNG/WebP/JPEG sizes are measured from the
+   current render before export.
 
 Most of the gallery is powered by the **Dither (Multi-tone)** renderer, which
 honours the colour count — set *Colors = 4* and the Ordered, Blue-Noise,
@@ -107,7 +110,8 @@ A single-algorithm workspace with every parameter exposed:
 
 | ID | Style | Notes |
 | -- | ----- | ----- |
-| `tone_dither` | Dither | **N-colour dithering.** 2-8 colours × palette (grayscale / adaptive / duotone) × method (ordered/Bayer, blue-noise, Floyd–Steinberg, wave). The workhorse for the multi-colour dithered look. |
+| `tone_dither` | Dither | **N-colour dithering.** 2-16 colours × palette (grayscale / adaptive / duotone / exact custom) × method (ordered, candidate-mix, blue-noise, and error diffusion). The workhorse for the multi-colour dithered look. |
+| `print_halftone` (Pages) | Halftone | Single spot or CMYK process plates with AM, FM, and hybrid screens, dot shape/gain controls, conventional plate angles, and overprint preview. |
 | `palette_quantize` | Pixel art | 2-8 colors, median-cut, optional FS dither |
 | `ordered_bayer` | Dither | Crisp grid threshold matrix |
 | `floyd_steinberg` | Dither | Classic error diffusion |
@@ -117,6 +121,12 @@ A single-algorithm workspace with every parameter exposed:
 | `pang_halftoning` | Halftone | Newsprint-style adaptive dots |
 | `tonal_analyzer` | Composited | Tonal wave with ink layers, supports SVG hatch export |
 | `structure_analyzer` | Composited | Structure tensor / ETF orientation, hatch + crosshatch SVG |
+
+In the Pages studio, editing a palette swatch on a palette-aware method promotes
+the visible colours to an exact custom palette and recalculates the dither. It
+does not merely repaint the old index map. Dithering is presented as an
+aesthetic or physical-palette constraint, not as a compression guarantee; the
+proof strip reports the actual browser-encoded sizes for each format.
 
 ## Data directory
 

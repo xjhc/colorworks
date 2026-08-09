@@ -111,8 +111,18 @@
 
         <div class="inspector-body" id="inspectorBody" hidden>
           <section class="block">
-            <div class="block-head"><span class="num">03</span><h2>Style</h2></div>
-            <select id="styleSelect" class="style-select"></select>
+            <div class="block-head"><span class="num">03</span><h2>Rendering intent</h2></div>
+            <div class="intent-grid" id="intentGrid" role="group" aria-label="Rendering intent">
+              <button type="button" data-intent="faithful"><b>Faithful palette</b><span>Exact inks, stable mix</span></button>
+              <button type="button" data-intent="organic"><b>Organic grain</b><span>Soft, irregular texture</span></button>
+              <button type="button" data-intent="ordered"><b>Graphic pattern</b><span>Crisp, repeating marks</span></button>
+              <button type="button" data-intent="print"><b>Print screen</b><span>Spot or CMYK plates</span></button>
+            </div>
+            <details class="method-details" open>
+              <summary>Method</summary>
+              <select id="styleSelect" class="style-select"></select>
+              <p id="styleDescription" class="field-note"></p>
+            </details>
           </section>
           <div class="knobs" id="knobs"></div>
 
@@ -130,24 +140,43 @@
             <input type="color" id="pinPicker" hidden />
           </section>
 
+          <section class="custom-palette" id="customPaletteBlock" hidden>
+            <div class="block-head"><span class="num">◎</span><h2>Exact inks</h2></div>
+            <textarea id="customPaletteText" rows="3" spellcheck="false" aria-label="Exact palette colors">#1c1712, #e8482f, #f5b32a, #2b3a8c</textarea>
+            <div class="custom-palette-actions">
+              <button type="button" id="applyCustomPalette">Apply palette</button>
+              <span id="customPaletteStatus">4 inks</span>
+            </div>
+            <p class="palette-hint">Hex colours only. These inks are used exactly; editing an output swatch recalculates the mix.</p>
+          </section>
+
           <section class="palette-block" id="paletteBlock" hidden>
             <div class="block-head">
               <span class="num" id="paletteCount">—</span><h2>Palette</h2>
               <button type="button" id="resetColors" class="reset-colors" hidden>reset</button>
             </div>
             <div class="swatches" id="swatches"></div>
-            <p class="palette-hint">Hover to find a colour · click to recolour</p>
+            <p class="palette-hint" id="paletteHint">Hover to isolate · click to edit and recalculate</p>
             <input type="color" id="swatchPicker" hidden />
           </section>
 
           <section class="export">
-            <div class="block-head"><span class="num">↧</span><h2>Export</h2></div>
+            <div class="block-head"><span class="num">≋</span><h2>Proof strip</h2></div>
+            <div class="plate-strip" id="plateStrip" hidden></div>
             <dl class="spec">
               <div><dt>dimensions</dt><dd id="specDims">—</dd></div>
               <div><dt>render</dt><dd id="specRender">—</dd></div>
+              <div><dt>used colours</dt><dd id="specColors">—</dd></div>
+              <div><dt>perceptual error</dt><dd id="specError">—</dd></div>
+              <div><dt>low-frequency error</dt><dd id="specTone">—</dd></div>
               <div><dt>checksum</dt><dd id="specHash">—</dd></div>
             </dl>
-            <a class="export-btn disabled" id="exportPng" download>Export PNG</a>
+            <div class="format-grid">
+              <a class="format-card disabled" id="exportPng" download><b>PNG</b><span id="sizePng">—</span><small>lossless</small></a>
+              <a class="format-card disabled" id="exportWebp" download><b>WebP</b><span id="sizeWebp">—</span><small>quality 90</small></a>
+              <a class="format-card disabled" id="exportJpeg" download><b>JPEG</b><span id="sizeJpeg">—</span><small>quality 85</small></a>
+            </div>
+            <p class="export-note" id="exportNote">Dithering is an aesthetic or palette constraint, not a compression guarantee. Choose the smallest acceptable proof.</p>
             <button type="button" class="export-btn ghost" id="copyGlyphs" hidden>Copy glyph text</button>
           </section>
         </div>

@@ -11,6 +11,7 @@ import {
   DEFAULT_STYLE_ID,
   type ParamDef,
   type StyleDef,
+  type StyleIntent,
 } from "./schema";
 import {
   renderToneDither,
@@ -28,6 +29,8 @@ import { renderKnit, type KnitOptions, type KnitSymbolMode } from "./knit";
 import { renderRepixel, detectCandidates, toGlyphText, type RepixelOptions } from "./repixel";
 import { boxFit, conformIndexed, type FitMode } from "./output_size";
 import { decodeToBitmap, classifyFile, decodeLabel } from "./decode";
+import { renderHalftone, type HalftoneResult } from "./halftone";
+import { computeProofMetrics, formatBytes } from "./proof";
 
 // Fixed seed — mirrors the studio's seed=42 so blue-noise/flow are stable.
 const SEED = 42;
@@ -58,6 +61,9 @@ interface RenderState {
     symbols: string[];
     symbolMode: KnitSymbolMode;
   };
+  plates?: HalftoneResult["plates"];
+  screen?: HalftoneResult["screen"];
+  cell?: number;
 }
 
 interface SetupState {
@@ -79,13 +85,20 @@ const state = {
   knobValues: {} as Record<string, Record<string, ParamValue>>,
   render: null as RenderState | null,
   colorMap: {} as Record<string, string>, // originalHex -> replacementHex
+  customPalette: [
+    [28, 23, 18],
+    [232, 72, 47],
+    [245, 179, 42],
+    [43, 58, 140],
+  ] as RGB[],
   pins: [] as PinnedColor[], // colours pinned BEFORE generation (lock/boost/exclude)
   hoverIdx: null as number | null,
   renderStart: 0,
   renderDebounce: 0 as ReturnType<typeof setTimeout> | 0,
   zoomMode: "fit" as "fit" | "manual",
   zoomPct: 100,
-  exportUrl: "",
+  exportUrls: {} as Record<string, string>,
+  exportSeq: 0,
   thumbUrl: "",
   offscreen: null as HTMLCanvasElement | null,
   glyphText: "" as string, // braille+block text of the native repixel render (repixel only)
@@ -245,14 +258,38 @@ function updateOutputPanel(): void {
 function buildStyleSelect(): void {
   const sel = $<HTMLSelectElement>("#styleSelect");
   sel.innerHTML = "";
-  STYLES.forEach((s) => {
-    const opt = document.createElement("option");
-    opt.value = s.id;
-    opt.textContent = s.label;
-    sel.appendChild(opt);
+  const labels: Record<StyleIntent, string> = {
+    faithful: "Faithful palette",
+    organic: "Organic grain",
+    ordered: "Graphic pattern",
+    print: "Print screen",
+    specialty: "More workflows",
+  };
+  (Object.keys(labels) as StyleIntent[]).forEach((intent) => {
+    const styles = STYLES.filter((s) => s.intent === intent);
+    if (!styles.length) return;
+    const group = document.createElement("optgroup");
+    group.label = labels[intent];
+    styles.forEach((s) => {
+      const opt = document.createElement("option");
+      opt.value = s.id;
+      opt.textContent = s.label;
+      group.appendChild(opt);
+    });
+    sel.appendChild(group);
   });
   sel.value = state.styleId;
   sel.addEventListener("change", () => applyStyle(sel.value));
+  $$("#intentGrid button").forEach((button) => {
+    button.addEventListener("click", () => {
+      const intent = button.dataset.intent as StyleIntent;
+      const preferred: Partial<Record<StyleIntent, string>> = {
+        faithful: "knoll", organic: "floyd_steinberg", ordered: "bayer", print: "halftone",
+      };
+      const next = preferred[intent] ?? STYLES.find((s) => s.intent === intent)?.id;
+      if (next) applyStyle(next);
+    });
+  });
 }
 
 function applyStyle(styleId: string): void {
@@ -264,7 +301,15 @@ function applyStyle(styleId: string): void {
   setZoomFit();
   updateOutputPanel();
   buildKnobs();
+  updateIntentUI();
   renderFocus();
+}
+
+function updateIntentUI(): void {
+  const style = styleById(state.styleId);
+  $$("#intentGrid button").forEach((button) => button.classList.toggle("active", button.dataset.intent === style.intent));
+  $("#styleDescription").textContent = style.description;
+  updateCustomPaletteVisibility();
 }
 
 function paramValue(p: ParamDef): ParamValue {
@@ -331,6 +376,7 @@ function buildKnobs(): void {
       sel.addEventListener("change", () => {
         persist(p.type === "int" ? parseInt(sel.value, 10) : sel.value);
         updateKnobVisibility();
+        updateCustomPaletteVisibility();
         scheduleRender();
       });
     } else {
@@ -354,6 +400,7 @@ function buildKnobs(): void {
     wrap.appendChild(row);
   });
   updateKnobVisibility();
+  updateCustomPaletteVisibility();
 }
 
 function updateKnobVisibility(): void {
@@ -404,6 +451,7 @@ function toRenderOptions(v: Record<string, ParamValue>): RenderOptions {
   return {
     colors: num("colors", 4),
     palette: v.palette as RenderOptions["palette"],
+    customPalette: state.customPalette,
     method: v.method as RenderOptions["method"],
     contrast: num("contrast", 1),
     midpoint: num("midpoint", 0.5),
@@ -467,6 +515,7 @@ function renderFocus(): void {
     let knitInfo = ""; // stitch-count / yarn readout (knit only)
     let swatchCount: number | undefined;
     let knitMeta: RenderState["knit"];
+    let halftoneMeta: Pick<HalftoneResult, "plates" | "screen" | "cell"> | undefined;
     state.glyphText = ""; // reset; set below only for the repixel renderer
     // Depixelate, Repixel, and Knit derive their own resolution from the full-res
     // grid, so they must see the source at native size (not the output-downscaled
@@ -477,7 +526,21 @@ function renderFocus(): void {
       style.renderer === "knit";
     const raster = rasterizeSource(nativeRes);
     let res: ReturnType<typeof renderToneDither>;
-    if (style.renderer === "depixelate") {
+    if (style.renderer === "halftone") {
+      const hres = renderHalftone(raster, {
+        separation: vals.separation as "spot" | "cmyk",
+        screen: vals.screen as "am" | "fm" | "hybrid",
+        cell: numParam(vals, "cell", 8),
+        angle: numParam(vals, "angle", 45),
+        dotShape: vals.dot_shape as "round" | "square" | "line",
+        dotGain: numParam(vals, "dot_gain", 0),
+        inkColor: String(vals.ink_color ?? "#1c1712"),
+        paperColor: String(vals.paper_color ?? "#f4ebd9"),
+        seed: SEED,
+      });
+      res = hres;
+      halftoneMeta = hres;
+    } else if (style.renderer === "depixelate") {
       res = renderDepixelate(raster, {
         block: numParam(vals, "block", 2),
         tau: numParam(vals, "tau", 45),
@@ -588,7 +651,11 @@ function renderFocus(): void {
       const { maxW, maxH, fit } = setupBucket();
       res = conformIndexed(res, maxW && maxW > 0 ? maxW : null, maxH && maxH > 0 ? maxH : null, fit);
     }
-    state.render = { w: res.width, h: res.height, idx: res.indices, palette: res.palette, swatchCount, knit: knitMeta };
+    state.render = {
+      w: res.width, h: res.height, idx: res.indices, palette: res.palette,
+      swatchCount, knit: knitMeta,
+      plates: halftoneMeta?.plates, screen: halftoneMeta?.screen, cell: halftoneMeta?.cell,
+    };
     state.hoverIdx = null;
 
     const cv = $<HTMLCanvasElement>("#bigCanvas");
@@ -604,6 +671,11 @@ function renderFocus(): void {
     $("#bigCaption").innerHTML = `<b>${name}</b> · ${res.width} × ${res.height} px${repixelInfo}${knitInfo}`;
     $("#specDims").textContent = `${res.width} × ${res.height}`;
     $("#specRender").textContent = `${elapsed} ms`;
+    const proof = computeProofMetrics(raster, res);
+    $("#specColors").textContent = proof ? String(proof.usedColors) : "n/a";
+    $("#specError").textContent = proof ? `ΔE ${proof.perceptualError.toFixed(1)}` : "n/a";
+    $("#specTone").textContent = proof ? `${proof.lowFrequencyError.toFixed(1)}%` : "n/a";
+    buildPlateStrip();
     $("#copyGlyphs").hidden = style.renderer !== "repixel";
     $("#plateLoading").hidden = true;
 
@@ -685,6 +757,28 @@ function drawKnitSymbols(ctx: CanvasRenderingContext2D, R: RenderState, palette:
   ctx.restore();
 }
 
+function buildPlateStrip(): void {
+  const wrap = $("#plateStrip");
+  const plates = state.render?.plates;
+  wrap.innerHTML = "";
+  wrap.hidden = !plates?.length;
+  if (!plates?.length) return;
+  plates.forEach((plate) => {
+    const item = document.createElement("span");
+    item.className = "plate-chip";
+    const color = document.createElement("i");
+    color.style.background = rgbToHex(plate.color);
+    const label = document.createElement("b");
+    label.textContent = `${plate.name} ${plate.angle}°`;
+    item.append(color, label);
+    wrap.append(item);
+  });
+  const meta = document.createElement("span");
+  meta.className = "plate-meta";
+  meta.textContent = `${state.render?.screen?.toUpperCase()} · ${state.render?.cell}px cell`;
+  wrap.append(meta);
+}
+
 // ── palette swatches ──────────────────────────────────────────────────────────
 function buildSwatches(): void {
   const R = state.render;
@@ -731,22 +825,81 @@ function buildSwatches(): void {
       btn.classList.remove("active");
       redrawCanvas();
     });
-    btn.addEventListener("click", () => openRecolor(hex));
+    btn.addEventListener("click", () => openRecolor(hex, i));
     wrap.appendChild(btn);
   });
   $("#resetColors").hidden = Object.keys(state.colorMap).length === 0;
 }
 
-function openRecolor(hex: string): void {
+function openRecolor(hex: string, index: number): void {
   const picker = $<HTMLInputElement>("#swatchPicker");
   picker.value = state.colorMap[hex] || hex;
   picker.oninput = () => {
+    if (rendererKey() === "tone_dither" && state.render) {
+      // Palette-aware renderers derive their mixing weights from the actual ink
+      // colours. Promote the visible palette to an exact palette and recalculate;
+      // repainting the old index map would make Knoll/Yliluoma/EMA untruthful.
+      state.customPalette = state.render.palette.map((c) => [...c] as RGB);
+      state.customPalette[index] = parseColor(picker.value);
+      knobBucket().palette = "custom";
+      const paletteSelect = document.getElementById("param-palette") as HTMLSelectElement | null;
+      if (paletteSelect) paletteSelect.value = "custom";
+      syncCustomPaletteText();
+      updateCustomPaletteVisibility();
+      scheduleRender();
+      return;
+    }
     state.colorMap[hex] = picker.value;
     redrawCanvas();
     buildSwatches();
     updateExport();
   };
   picker.click();
+}
+
+function parseCustomPalette(text: string): RGB[] {
+  const matches = text.match(/#[0-9a-fA-F]{6}\b/g) ?? [];
+  const seen = new Set<string>();
+  const colors: RGB[] = [];
+  for (const value of matches.slice(0, 16)) {
+    const key = value.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      colors.push(parseColor(key));
+    }
+  }
+  return colors;
+}
+
+function syncCustomPaletteText(): void {
+  $<HTMLTextAreaElement>("#customPaletteText").value = state.customPalette.map(rgbToHex).join(", ");
+  $("#customPaletteStatus").textContent = `${state.customPalette.length} ink${state.customPalette.length === 1 ? "" : "s"}`;
+}
+
+function updateCustomPaletteVisibility(): void {
+  const style = styleById(state.styleId);
+  const palette = style.renderer ? null : (document.getElementById("param-palette") as HTMLSelectElement | null)?.value ?? knobBucket().palette;
+  $("#customPaletteBlock").hidden = palette !== "custom";
+  document.getElementById("knob-colors")?.classList.toggle("hidden", palette === "custom");
+  $("#pinBlock").hidden = palette === "custom" || style.renderer === "halftone";
+  $("#paletteHint").textContent = rendererKey() === "tone_dither"
+    ? "Hover to isolate · click to edit and recalculate"
+    : "Hover to isolate · click to remap the result";
+}
+
+function bindCustomPalette(): void {
+  syncCustomPaletteText();
+  $("#applyCustomPalette").addEventListener("click", () => {
+    const colors = parseCustomPalette($<HTMLTextAreaElement>("#customPaletteText").value);
+    if (colors.length < 2) {
+      toast("Enter at least two unique six-digit hex colours");
+      return;
+    }
+    state.customPalette = colors;
+    knobBucket().palette = "custom";
+    syncCustomPaletteText();
+    scheduleRender();
+  });
 }
 
 // ── colour pins (steer which colours generation picks) ─────────────────────────
@@ -829,18 +982,39 @@ function bindPins(): void {
 }
 
 // ── export (local PNG + Web Crypto checksum) ──────────────────────────────────
-function updateExport(): void {
+function canvasBlob(canvas: HTMLCanvasElement, mime: string, quality?: number): Promise<Blob | null> {
+  return new Promise((resolve) => canvas.toBlob(resolve, mime, quality));
+}
+
+async function updateExport(): Promise<void> {
   const cv = $<HTMLCanvasElement>("#bigCanvas");
-  cv.toBlob((blob) => {
-    if (!blob) return;
-    if (state.exportUrl) URL.revokeObjectURL(state.exportUrl);
-    state.exportUrl = URL.createObjectURL(blob);
-    const link = $<HTMLAnchorElement>("#exportPng");
-    link.href = state.exportUrl;
-    link.download = exportFilename();
+  const seq = ++state.exportSeq;
+  const formats = [
+    { id: "Png", mime: "image/png", ext: "png", quality: undefined },
+    { id: "Webp", mime: "image/webp", ext: "webp", quality: 0.9 },
+    { id: "Jpeg", mime: "image/jpeg", ext: "jpg", quality: 0.85 },
+  ];
+  const blobs = await Promise.all(formats.map((f) => canvasBlob(cv, f.mime, f.quality)));
+  if (seq !== state.exportSeq) return;
+  formats.forEach((format, i) => {
+    const blob = blobs[i];
+    const link = $<HTMLAnchorElement>(`#export${format.id}`);
+    const size = $(`#size${format.id}`);
+    const old = state.exportUrls[format.ext];
+    if (old) URL.revokeObjectURL(old);
+    if (!blob || (format.mime !== "image/png" && blob.type !== format.mime)) {
+      link.classList.add("disabled");
+      size.textContent = "unsupported";
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    state.exportUrls[format.ext] = url;
+    link.href = url;
+    link.download = exportFilename(format.ext);
     link.classList.remove("disabled");
-    void setChecksum(blob);
-  }, "image/png");
+    size.textContent = formatBytes(blob.size);
+  });
+  if (blobs[0]) void setChecksum(blobs[0]);
 }
 
 async function setChecksum(blob: Blob): Promise<void> {
@@ -856,10 +1030,10 @@ async function setChecksum(blob: Blob): Promise<void> {
   }
 }
 
-function exportFilename(): string {
+function exportFilename(ext = "png"): string {
   const base = state.sourceName.replace(/\.[^.]+$/, "") || "image";
   const dims = state.render ? `_${state.render.w}x${state.render.h}` : "";
-  return `${base}_${state.styleId}${dims}.png`;
+  return `${base}_${state.styleId}${dims}.${ext}`;
 }
 
 // ── zoom + pan ────────────────────────────────────────────────────────────────
@@ -983,7 +1157,9 @@ function init(): void {
     updateExport();
   });
   bindPins();
+  bindCustomPalette();
   buildPins();
+  updateIntentUI();
   $("#copyGlyphs").addEventListener("click", () => copyGlyphText());
   showStudio(false);
 

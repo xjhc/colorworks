@@ -28,7 +28,7 @@
 import { BLUE_NOISE_TILES_B64 } from "./blue-noise-tiles";
 
 export type RGB = [number, number, number];
-export type PaletteMode = "grayscale" | "adaptive" | "duotone";
+export type PaletteMode = "grayscale" | "adaptive" | "duotone" | "custom";
 
 /**
  * A colour the user pins before generation, to steer which colours the adaptive
@@ -88,8 +88,10 @@ export interface RenderParams {
 }
 
 export interface RenderOptions {
-  colors?: number; // 2..8
+  colors?: number; // 2..16
   palette?: PaletteMode;
+  /** Exact user-supplied palette. Used verbatim when `palette === "custom"`. */
+  customPalette?: RGB[];
   method?: DitherMethod;
   contrast?: number;
   midpoint?: number;
@@ -770,8 +772,22 @@ export function buildTonePalette(
   paperColor = "#f4ebd9",
   seed = 0,
   pins?: PinnedColor[],
+  customPalette?: RGB[],
 ): RGB[] {
-  colors = Math.max(2, Math.floor(colors));
+  colors = Math.max(2, Math.min(16, Math.floor(colors)));
+  if (mode === "custom" && customPalette && customPalette.length >= 2) {
+    const seen = new Set<string>();
+    const exact: RGB[] = [];
+    for (const color of customPalette.slice(0, 16)) {
+      const rgb: RGB = [clampByte(color[0]), clampByte(color[1]), clampByte(color[2])];
+      const key = rgbToHex(rgb);
+      if (!seen.has(key)) {
+        seen.add(key);
+        exact.push(rgb);
+      }
+    }
+    if (exact.length >= 2) return exact;
+  }
   if (mode === "grayscale") {
     return Array.from({ length: colors }, (_, i) =>
       lerpRgb([0, 0, 0], [255, 255, 255], i / (colors - 1)),
@@ -1781,7 +1797,7 @@ const METHODS: DitherMethod[] = [
   "atkinson", "jarvis", "stucki", "burkes", "sierra",
   "ostromoukhov", "yliluoma", "knoll", "ema", "flow", "flat",
 ];
-const MODES: PaletteMode[] = ["grayscale", "adaptive", "duotone"];
+const MODES: PaletteMode[] = ["grayscale", "adaptive", "duotone", "custom"];
 
 /**
  * Render a raster as an N-colour dither — the heart of the target aesthetic.
@@ -1790,7 +1806,10 @@ const MODES: PaletteMode[] = ["grayscale", "adaptive", "duotone"];
  */
 export function renderToneDither(raster: Raster, opts: RenderOptions = {}): RenderResult {
   const { width: w, height: h } = raster;
-  const colors = Math.max(2, Math.min(8, Math.floor(opts.colors ?? 4)));
+  const requestedColors = opts.palette === "custom" && opts.customPalette
+    ? opts.customPalette.length
+    : (opts.colors ?? 4);
+  const colors = Math.max(2, Math.min(16, Math.floor(requestedColors)));
   const method: DitherMethod = METHODS.includes(opts.method as DitherMethod)
     ? (opts.method as DitherMethod)
     : "floyd_steinberg";
@@ -1810,6 +1829,7 @@ export function renderToneDither(raster: Raster, opts: RenderOptions = {}): Rend
     opts.paperColor ?? "#f4ebd9",
     seed,
     opts.pins,
+    opts.customPalette,
   );
 
   const rgb01 = rasterToRgb01(raster);

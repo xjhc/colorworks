@@ -421,6 +421,21 @@ describe("N-candidate ordered dithering (knoll / ema)", () => {
   });
 });
 
+describe("exact custom palettes", () => {
+  it("uses the supplied inks verbatim and lets their count override the generic color knob", () => {
+    const custom: RGB[] = [[12, 24, 36], [220, 40, 60], [250, 210, 30]];
+    const raster = makeRaster(16, 16, (x, y) => custom[(x + y) % custom.length]);
+    const out = renderToneDither(raster, {
+      colors: 8,
+      palette: "custom",
+      customPalette: custom,
+      method: "knoll",
+    });
+    expect(out.palette).toEqual(custom);
+    expect(new Set(out.indices)).toEqual(new Set([0, 1, 2]));
+  });
+});
+
 // ── 4e. Serpentine scan + Ostromoukhov variable coefficients ──────────────────
 describe("serpentine error diffusion", () => {
   const BW: RGB[] = [
