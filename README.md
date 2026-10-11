@@ -122,9 +122,26 @@ A single-algorithm workspace with every parameter exposed:
 | `tonal_analyzer` | Composited | Tonal wave with ink layers, supports SVG hatch export |
 | `structure_analyzer` | Composited | Structure tensor / ETF orientation, hatch + crosshatch SVG |
 
-In the Pages studio, editing a palette swatch on a palette-aware method promotes
-the visible colours to an exact custom palette and recalculates the dither. It
-does not merely repaint the old index map. Dithering is presented as an
+In the Pages studio, a new image opens on **All styles**: every style rendered
+side by side for the current image, palette, and output size (re-rendered as the
+knobs change), so choosing a look is visual. Click a card to open it.
+
+**Output size** sets the dither grain; **export scale** (1×/2×/4×/8×,
+nearest-neighbour) sets the size of the exported file, so a 360 px dither can be
+shared at 1440 px without changing its look. The on-screen preview never
+resamples dots unevenly: whole-number zooms are crisp, fractional ones use sharp
+bilinear, and reductions are averaged rather than aliased.
+
+Adaptive palettes have a **palette spread** knob (default 0.35): k-means inks are
+cluster averages, which sit inside the image's real range, so dithered output
+loses its lights, darks, and saturation. Spread pushes each ink outward toward
+colours the image actually contains (measured at viewing distance, every dither
+method improves at 0.25–0.5). Flat poster ignores it.
+
+Editing a palette swatch on a palette-aware method promotes the visible colours
+to an exact custom palette and recalculates the dither — it does not merely
+repaint the old index map. The palette block then offers **revert** to return to
+the previous (e.g. adaptive) palette. Dithering is presented as an
 aesthetic or physical-palette constraint, not as a compression guarantee; the
 proof strip reports the actual browser-encoded sizes for each format.
 

@@ -32,7 +32,8 @@ export interface ParamDef {
   options?: OptionDef[];
   group: "palette" | "pattern" | "tone";
   uiHint?: "color";
-  visibleWhen?: VisibleWhen;
+  /** Shown only when this holds — or, given several, when all of them hold. */
+  visibleWhen?: VisibleWhen | VisibleWhen[];
 }
 
 /** Mirror of tone_dither.py DEFINITION.parameters (plus `flat` as a method). */
@@ -58,6 +59,31 @@ export const TONE_DITHER_PARAMS: ParamDef[] = [
       { value: "grayscale", label: "Grayscale" },
       { value: "duotone", label: "Duotone (ink → paper)" },
       { value: "custom", label: "Exact custom inks" },
+    ],
+  },
+  {
+    key: "spread",
+    label: "Palette spread",
+    type: "float",
+    // Pushes adaptive inks from cluster averages toward the image's real lights,
+    // darks, and saturated colours, so dithering can mix all the way to them.
+    // Measured on 5 photos (blurred-ΔE, i.e. at viewing distance) every dither
+    // method improves at 0.25–0.5; past ~0.75 the wider ink spacing reads as
+    // grain. Flat poster ignores it (no mixing), so it's hidden there.
+    default: 0.35,
+    min: 0,
+    max: 1,
+    step: 0.05,
+    group: "palette",
+    visibleWhen: [
+      { param: "palette", equals: ["adaptive"] },
+      {
+        param: "method",
+        equals: [
+          "bayer", "blue_noise", "ign", "r2", "floyd_steinberg", "atkinson", "jarvis", "stucki",
+          "burkes", "sierra", "ostromoukhov", "yliluoma", "knoll", "ema", "flow",
+        ],
+      },
     ],
   },
   {

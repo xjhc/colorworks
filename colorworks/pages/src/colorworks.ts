@@ -85,6 +85,7 @@ export interface RenderParams {
   candidates?: number; // knoll | ema: N candidate search iterations (default 2×palette, min 16)
   ditherStrength?: number; // knoll: error-compensation scale, 0..1
   serpentine?: boolean; // error diffusion: alternate scan direction per row (default true)
+  spread?: number; // adaptive palette: push inks toward the image's extremes, 0..1 (ignored for flat)
 }
 
 export interface RenderOptions {
@@ -288,6 +289,27 @@ function gaussianBlur(src: Float32Array, w: number, h: number, sigma: number): F
 }
 
 // ── Palettes ──────────────────────────────────────────────────────────────────
+/** The palette quantisers' working set: the raster nearest-neighbour
+ *  subsampled to ≤`maxDim` px (DOM-free), as OKLab points. */
+function sampleOklab(raster: Raster, maxDim = 96): { P: Float32Array; m: number } {
+  const { width: w, height: h, data } = raster;
+  const longest = Math.max(w, h);
+  const s = longest > maxDim ? maxDim / longest : 1;
+  const sw = Math.max(1, Math.round(w * s));
+  const sh = Math.max(1, Math.round(h * s));
+  const m = w && h ? sw * sh : 0;
+  const P = new Float32Array(m * 3);
+  for (let ty = 0; ty < sh && m; ty++) {
+    const syRow = Math.min(h - 1, Math.floor(ty / s)) * w;
+    for (let tx = 0; tx < sw; tx++) {
+      const sx = Math.min(w - 1, Math.floor(tx / s));
+      const src = (syRow + sx) * 4;
+      srgbToOklabInto(data[src] / 255, data[src + 1] / 255, data[src + 2] / 255, P, (ty * sw + tx) * 3);
+    }
+  }
+  return { P, m };
+}
+
 /**
  * Adaptive palette extraction in OKLab on a ≤96px subsample. Seeds with
  * perceptual median-cut (split the box with the largest sum-of-squared-error
@@ -310,25 +332,9 @@ export function kmeansPalette(
   void seed;
   colors = Math.max(2, Math.floor(colors));
   if (pins && pins.length) return constrainedKmeansPalette(raster, colors, pins, iters);
-  const { width: w, height: h, data } = raster;
-
   // Subsample to a max dimension of 96 (nearest-neighbour, DOM-free), → OKLab.
-  const maxDim = Math.max(w, h);
-  const s = maxDim > 96 ? 96 / maxDim : 1;
-  const sw = Math.max(1, Math.round(w * s));
-  const sh = Math.max(1, Math.round(h * s));
-  const m = sw * sh;
+  const { P, m } = sampleOklab(raster);
   if (m === 0) return buildTonePalette(raster, colors, "grayscale");
-
-  const P = new Float32Array(m * 3); // OKLab points
-  for (let ty = 0; ty < sh; ty++) {
-    const syRow = Math.min(h - 1, Math.floor(ty / s)) * w;
-    for (let tx = 0; tx < sw; tx++) {
-      const sx = Math.min(w - 1, Math.floor(tx / s));
-      const src = (syRow + sx) * 4;
-      srgbToOklabInto(data[src] / 255, data[src + 1] / 255, data[src + 2] / 255, P, (ty * sw + tx) * 3);
-    }
-  }
 
   // Mean + per-axis variance (×count = SSE) of the point slice idx[lo, hi).
   const idx = new Int32Array(m);
@@ -530,21 +536,7 @@ function constrainedKmeansPalette(
   const freeN = colors - lockN;
 
   // Subsample → OKLab points (same ≤96px lattice as kmeansPalette).
-  const { width: w, height: h, data } = raster;
-  const maxDim = Math.max(w, h);
-  const s = maxDim > 96 ? 96 / maxDim : 1;
-  const sw = Math.max(1, Math.round(w * s));
-  const sh = Math.max(1, Math.round(h * s));
-  const m0 = sw * sh;
-  const Praw = new Float32Array(m0 * 3);
-  for (let ty = 0; ty < sh; ty++) {
-    const syRow = Math.min(h - 1, Math.floor(ty / s)) * w;
-    for (let tx = 0; tx < sw; tx++) {
-      const sx = Math.min(w - 1, Math.floor(tx / s));
-      const src = (syRow + sx) * 4;
-      srgbToOklabInto(data[src] / 255, data[src + 1] / 255, data[src + 2] / 255, Praw, (ty * sw + tx) * 3);
-    }
-  }
+  const { P: Praw, m: m0 } = sampleOklab(raster);
 
   // Exclusion: drop points near any exclude pin (keep all if that empties it).
   const keep: number[] = [];
@@ -764,6 +756,85 @@ function constrainedKmeansPalette(
   return swatches.slice(0, colors);
 }
 
+// ── Palette spread (dither-aware extremes) ─────────────────────────────────────
+/** Members' percentile along the centroid's outward direction that `amount = 1`
+ *  moves the centroid to — a colour that really occurs in the image, short of
+ *  its rarest outliers. */
+const SPREAD_PERCENTILE = 0.9;
+/** OKLab distance from the image mean at which a centroid gets the full move;
+ *  centroids nearer the mean have no meaningful "outward" and move less. */
+const SPREAD_FULL_DIST = 0.08;
+
+/**
+ * Push adaptive palette colours outward toward the edges of the image's colour
+ * distribution. Quantiser centroids are cluster *averages*, so the palette's
+ * hull sits inside the image's gamut: the lightest ink is greyer than the
+ * image's whites, the darkest lighter than its blacks, and saturated regions
+ * come out desaturated. A ditherer can only mix colours inside the palette's
+ * hull, so those extremes are lost — dithered output looks flat and muddy.
+ *
+ * Each centroid moves along its direction from the image mean to the
+ * SPREAD_PERCENTILE of its own members along that direction, scaled by
+ * `amount` (0 = unchanged). `fixed` colours (locked pins) never move. Mid-tones
+ * stay reachable because dithering mixes them from the wider inks. Not for
+ * flat (undithered) output, where the centroid is the least-error colour.
+ */
+export function spreadPalette(raster: Raster, palette: RGB[], amount: number, fixed: RGB[] = []): RGB[] {
+  if (!(amount > 0) || palette.length < 2) return palette;
+  const { P, m } = sampleOklab(raster);
+  if (m === 0) return palette;
+  const k = palette.length;
+  const C = paletteToOklab(palette);
+  let mL = 0;
+  let mA = 0;
+  let mB = 0;
+  for (let i = 0; i < m; i++) {
+    mL += P[i * 3];
+    mA += P[i * 3 + 1];
+    mB += P[i * 3 + 2];
+  }
+  mL /= m;
+  mA /= m;
+  mB /= m;
+  const members: number[][] = Array.from({ length: k }, () => []);
+  for (let i = 0; i < m; i++) {
+    let best = Infinity;
+    let bj = 0;
+    for (let j = 0; j < k; j++) {
+      const dL = P[i * 3] - C[j * 3];
+      const dA = P[i * 3 + 1] - C[j * 3 + 1];
+      const dB = P[i * 3 + 2] - C[j * 3 + 2];
+      const dd = dL * dL + dA * dA + dB * dB;
+      if (dd < best) {
+        best = dd;
+        bj = j;
+      }
+    }
+    members[bj].push(i);
+  }
+  const fixedHex = new Set(fixed.map(rgbToHex));
+  const out = palette.map((c, j): RGB => {
+    if (fixedHex.has(rgbToHex(c)) || members[j].length === 0) return c;
+    const dL = C[j * 3] - mL;
+    const dA = C[j * 3 + 1] - mA;
+    const dB = C[j * 3 + 2] - mB;
+    const dist = Math.hypot(dL, dA, dB);
+    if (dist < 1e-4) return c;
+    const uL = dL / dist;
+    const uA = dA / dist;
+    const uB = dB / dist;
+    const t = members[j].map((i) =>
+      (P[i * 3] - C[j * 3]) * uL + (P[i * 3 + 1] - C[j * 3 + 1]) * uA + (P[i * 3 + 2] - C[j * 3 + 2]) * uB,
+    );
+    t.sort((a, b) => a - b);
+    const reach = Math.max(0, t[Math.min(t.length - 1, Math.floor(SPREAD_PERCENTILE * t.length))]);
+    const move = amount * reach * Math.min(1, dist / SPREAD_FULL_DIST);
+    return oklabToRgb(C[j * 3] + uL * move, C[j * 3 + 1] + uA * move, C[j * 3 + 2] + uB * move);
+  });
+  out.sort((a, b) => luma(a[0], a[1], a[2]) - luma(b[0], b[1], b[2]));
+  return out;
+}
+
 export function buildTonePalette(
   raster: Raster,
   colors: number,
@@ -773,6 +844,7 @@ export function buildTonePalette(
   seed = 0,
   pins?: PinnedColor[],
   customPalette?: RGB[],
+  spread = 0,
 ): RGB[] {
   colors = Math.max(2, Math.min(16, Math.floor(colors)));
   if (mode === "custom" && customPalette && customPalette.length >= 2) {
@@ -800,7 +872,10 @@ export function buildTonePalette(
       lerpRgb(ink, paper, i / (colors - 1)),
     );
   }
-  return kmeansPalette(raster, colors, seed, 16, pins);
+  const adaptive = kmeansPalette(raster, colors, seed, 16, pins);
+  if (!(spread > 0)) return adaptive;
+  const locked = (pins ?? []).filter((p) => p.mode === "lock").map((p) => parseColor(p.hex));
+  return spreadPalette(raster, adaptive, spread, locked);
 }
 
 // ── Threshold masks ───────────────────────────────────────────────────────────
@@ -1830,6 +1905,9 @@ export function renderToneDither(raster: Raster, opts: RenderOptions = {}): Rend
     seed,
     opts.pins,
     opts.customPalette,
+    // Flat assigns each pixel its nearest ink with no mixing, so the cluster
+    // average is already its best colour; spreading only helps dithering.
+    method === "flat" ? 0 : (p.spread ?? 0),
   );
 
   const rgb01 = rasterToRgb01(raster);
