@@ -75,12 +75,21 @@
           </div>
           <h2>A photo, a few colors, a thousand dots.</h2>
           <p>
-            Drop a photo on the left. It opens straight in the studio — pick a style, turn the knobs,
+            Drop a photo on the left. Every style renders side by side — pick one, turn the knobs,
             watch it render live, recolour the palette, and export.
           </p>
         </section>
 
         <section class="focus-view" id="editorView" hidden>
+          <div class="stage-bar">
+            <div class="seg view-seg" id="viewGroup" role="group" aria-label="View">
+              <button type="button" data-view="grid">All styles</button>
+              <button type="button" data-view="single" class="active">Selected</button>
+            </div>
+            <span class="stage-hint" id="gridHint"></span>
+          </div>
+          <div class="variant-view" id="variantView" hidden></div>
+          <div class="single-view" id="singleView">
           <div class="lightbox">
             <figure class="plate" id="plate">
               <span class="reg tl" aria-hidden="true">&#8853;</span>
@@ -99,6 +108,7 @@
             <button type="button" class="zoom-step" data-step="1" aria-label="Zoom in">+</button>
             <span class="zoom-val" id="zoomVal">fit</span>
           </div>
+          </div>
         </section>
       </main>
 
@@ -111,18 +121,9 @@
 
         <div class="inspector-body" id="inspectorBody" hidden>
           <section class="block">
-            <div class="block-head"><span class="num">03</span><h2>Rendering intent</h2></div>
-            <div class="intent-grid" id="intentGrid" role="group" aria-label="Rendering intent">
-              <button type="button" data-intent="faithful"><b>Faithful palette</b><span>Exact inks, stable mix</span></button>
-              <button type="button" data-intent="organic"><b>Organic grain</b><span>Soft, irregular texture</span></button>
-              <button type="button" data-intent="ordered"><b>Graphic pattern</b><span>Crisp, repeating marks</span></button>
-              <button type="button" data-intent="print"><b>Print screen</b><span>Spot or CMYK plates</span></button>
-            </div>
-            <details class="method-details" open>
-              <summary>Method</summary>
-              <select id="styleSelect" class="style-select"></select>
-              <p id="styleDescription" class="field-note"></p>
-            </details>
+            <div class="block-head"><span class="num">03</span><h2>Style</h2></div>
+            <select id="styleSelect" class="style-select" aria-label="Style"></select>
+            <p id="styleDescription" class="field-note"></p>
           </section>
           <div class="knobs" id="knobs"></div>
 
@@ -163,8 +164,18 @@
           <section class="export">
             <div class="block-head"><span class="num">≋</span><h2>Proof strip</h2></div>
             <div class="plate-strip" id="plateStrip" hidden></div>
+            <div class="scale-row" id="scaleRow">
+              <span class="scale-label">Export scale</span>
+              <div class="seg" id="scaleGroup" role="group" aria-label="Export scale">
+                <button type="button" data-scale="1">1×</button>
+                <button type="button" data-scale="2">2×</button>
+                <button type="button" data-scale="4" class="active">4×</button>
+                <button type="button" data-scale="8">8×</button>
+              </div>
+            </div>
             <dl class="spec">
               <div><dt>dimensions</dt><dd id="specDims">—</dd></div>
+              <div><dt>export size</dt><dd id="specExport">—</dd></div>
               <div><dt>render</dt><dd id="specRender">—</dd></div>
               <div><dt>used colours</dt><dd id="specColors">—</dd></div>
               <div><dt>perceptual error</dt><dd id="specError">—</dd></div>

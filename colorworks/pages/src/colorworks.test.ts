@@ -22,6 +22,7 @@ import {
   srgbToOklab,
   oklabToRgb,
   kmeansPalette,
+  spreadPalette,
 } from "./colorworks";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -640,5 +641,47 @@ describe("renderToneDither", () => {
     const b = renderToneDither(raster, { colors: 6, palette: "adaptive", method: "bayer", seed: 7 });
     expect(a.palette).toEqual(b.palette);
     expect(Array.from(a.indices)).toEqual(Array.from(b.indices));
+  });
+});
+
+describe("spreadPalette (dither-aware extremes)", () => {
+  // A smooth warm gradient from near-black to near-white: the k-means inks are
+  // cluster averages, so the darkest sits above the image's black and the
+  // lightest below its white.
+  const ramp = makeRaster(96, 24, (x) => {
+    const t = x / 95;
+    return [Math.round(12 + 236 * t), Math.round(8 + 222 * t), Math.round(6 + 196 * t)];
+  });
+  const L = (c: RGB) => srgbToOklab(c)[0];
+
+  it("is a no-op at amount 0", () => {
+    const pal = kmeansPalette(ramp, 4);
+    expect(spreadPalette(ramp, pal, 0)).toEqual(pal);
+  });
+
+  it("pushes the darkest ink darker and the lightest lighter, toward the image's range", () => {
+    const pal = kmeansPalette(ramp, 4);
+    const out = spreadPalette(ramp, pal, 1);
+    expect(L(out[0])).toBeLessThan(L(pal[0]) - 0.02);
+    expect(L(out[out.length - 1])).toBeGreaterThan(L(pal[pal.length - 1]) + 0.02);
+    // …but never past the colours the image actually contains.
+    expect(L(out[0])).toBeGreaterThanOrEqual(L([12, 8, 6]) - 0.01);
+    expect(L(out[out.length - 1])).toBeLessThanOrEqual(L([248, 230, 202]) + 0.01);
+  });
+
+  it("leaves locked (fixed) inks exactly where they are", () => {
+    const pal = kmeansPalette(ramp, 4);
+    const out = spreadPalette(ramp, pal, 1, [pal[0]]);
+    expect(out).toContainEqual(pal[0]);
+  });
+
+  it("widens the dithered tonal range in renderToneDither, but not for flat", () => {
+    const span = (spread: number, method: "floyd_steinberg" | "flat") => {
+      const res = renderToneDither(ramp, { colors: 4, palette: "adaptive", method, params: { spread } });
+      const ls = res.palette.map(L);
+      return Math.max(...ls) - Math.min(...ls);
+    };
+    expect(span(0.5, "floyd_steinberg")).toBeGreaterThan(span(0, "floyd_steinberg"));
+    expect(span(1, "flat")).toBeCloseTo(span(0, "flat"), 6);
   });
 });

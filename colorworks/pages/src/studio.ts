@@ -15,11 +15,13 @@ import {
 } from "./schema";
 import {
   renderToneDither,
+  paintIndices,
   rgbToHex,
   parseColor,
   type RGB,
   type Raster,
   type RenderOptions,
+  type RenderResult,
   type PinnedColor,
   type PinMode,
 } from "./colorworks";
@@ -99,9 +101,24 @@ const state = {
   zoomPct: 100,
   exportUrls: {} as Record<string, string>,
   exportSeq: 0,
+  exportTimer: 0 as ReturnType<typeof setTimeout> | 0,
+  // Requested nearest-neighbour export multiplier; clamped by EXPORT_MAX_* below.
+  // Decouples the dither grain (output size) from the size of the exported file.
+  exportScale: 4,
   thumbUrl: "",
   offscreen: null as HTMLCanvasElement | null,
+  // The render at native resolution — the source of truth for export. #bigCanvas
+  // is only its on-screen presentation (which may be a smoothed reduction).
+  native: null as HTMLCanvasElement | null,
+  exportCanvas: null as HTMLCanvasElement | null,
   glyphText: "" as string, // braille+block text of the native repixel render (repixel only)
+  // Palette mode before a swatch edit promoted it to exact inks (tone dither);
+  // non-null means the palette block offers "revert".
+  paletteBeforeEdit: null as string | null,
+  view: "single" as "single" | "grid",
+  gridSeq: 0,
+  gridTimer: 0 as ReturnType<typeof setTimeout> | 0,
+  gridDirty: true,
 };
 
 function styleById(id: string): StyleDef {
@@ -112,22 +129,31 @@ function rendererKey(style = styleById(state.styleId)): string {
   return style.renderer ?? "tone_dither";
 }
 
-function defaultSetupForRenderer(renderer: string): SetupState {
-  if (renderer === "knit") return { maxW: 200, maxH: null, fit: "fit" };
-  return { maxW: 360, maxH: null, fit: "fit" };
+/** Output size is shared by every image renderer (switching style must not
+ *  silently change the output size); knit keeps its own, because there W/H are
+ *  stitch counts rather than pixels. */
+function setupKey(style: StyleDef): string {
+  return rendererKey(style) === "knit" ? "knit" : "image";
 }
 
-/** Output-size state is per renderer, just like knobs. For knit, maxW/maxH are
- *  stitch counts; for the image renderers, they are output pixels. */
+function setupFor(style: StyleDef): SetupState {
+  const key = setupKey(style);
+  return (state.setupValues[key] ??= key === "knit"
+    ? { maxW: 200, maxH: null, fit: "fit" }
+    : { maxW: 360, maxH: null, fit: "fit" });
+}
+
 function setupBucket(): SetupState {
-  const key = rendererKey();
-  return (state.setupValues[key] ??= { ...defaultSetupForRenderer(key) });
+  return setupFor(styleById(state.styleId));
 }
 
-/** The current style's knob bucket (created on first access), keyed by renderer. */
+/** A style's knob bucket (created on first access), keyed by renderer. */
+function knobBucketFor(style: StyleDef): Record<string, ParamValue> {
+  return (state.knobValues[rendererKey(style)] ??= {});
+}
+
 function knobBucket(): Record<string, ParamValue> {
-  const renderer = rendererKey();
-  return (state.knobValues[renderer] ??= {});
+  return knobBucketFor(styleById(state.styleId));
 }
 
 // ── toast ─────────────────────────────────────────────────────────────────────
@@ -206,7 +232,9 @@ async function loadFile(file: File): Promise<void> {
   $("#topbarMeta").textContent = `${state.sourceName} · ${bitmap.width}×${bitmap.height}`;
 
   showStudio(true);
-  applyStyle(state.styleId); // open straight into a live render
+  buildGrid();
+  applyStyle(state.styleId); // render the selected style behind the grid
+  setView("grid"); // a new image opens on every style side by side
 }
 
 // ── output controls ───────────────────────────────────────────────────────────
@@ -255,21 +283,22 @@ function updateOutputPanel(): void {
 }
 
 // ── style + knobs ─────────────────────────────────────────────────────────────
+const INTENTS: Record<StyleIntent, { label: string; blurb: string }> = {
+  faithful: { label: "Faithful palette", blurb: "Exact inks, stable mix" },
+  organic: { label: "Organic grain", blurb: "Soft, irregular texture" },
+  ordered: { label: "Graphic pattern", blurb: "Crisp, repeating marks" },
+  print: { label: "Print screen", blurb: "Spot or CMYK plates" },
+  specialty: { label: "More workflows", blurb: "Tools for specific jobs" },
+};
+
 function buildStyleSelect(): void {
   const sel = $<HTMLSelectElement>("#styleSelect");
   sel.innerHTML = "";
-  const labels: Record<StyleIntent, string> = {
-    faithful: "Faithful palette",
-    organic: "Organic grain",
-    ordered: "Graphic pattern",
-    print: "Print screen",
-    specialty: "More workflows",
-  };
-  (Object.keys(labels) as StyleIntent[]).forEach((intent) => {
+  (Object.keys(INTENTS) as StyleIntent[]).forEach((intent) => {
     const styles = STYLES.filter((s) => s.intent === intent);
     if (!styles.length) return;
     const group = document.createElement("optgroup");
-    group.label = labels[intent];
+    group.label = INTENTS[intent].label;
     styles.forEach((s) => {
       const opt = document.createElement("option");
       opt.value = s.id;
@@ -280,16 +309,6 @@ function buildStyleSelect(): void {
   });
   sel.value = state.styleId;
   sel.addEventListener("change", () => applyStyle(sel.value));
-  $$("#intentGrid button").forEach((button) => {
-    button.addEventListener("click", () => {
-      const intent = button.dataset.intent as StyleIntent;
-      const preferred: Partial<Record<StyleIntent, string>> = {
-        faithful: "knoll", organic: "floyd_steinberg", ordered: "bayer", print: "halftone",
-      };
-      const next = preferred[intent] ?? STYLES.find((s) => s.intent === intent)?.id;
-      if (next) applyStyle(next);
-    });
-  });
 }
 
 function applyStyle(styleId: string): void {
@@ -301,24 +320,28 @@ function applyStyle(styleId: string): void {
   setZoomFit();
   updateOutputPanel();
   buildKnobs();
-  updateIntentUI();
+  updateStyleUI();
+  markSelectedVariant();
   renderFocus();
 }
 
-function updateIntentUI(): void {
+function updateStyleUI(): void {
   const style = styleById(state.styleId);
-  $$("#intentGrid button").forEach((button) => button.classList.toggle("active", button.dataset.intent === style.intent));
   $("#styleDescription").textContent = style.description;
   updateCustomPaletteVisibility();
 }
 
-function paramValue(p: ParamDef): ParamValue {
-  let v = knobBucket()[p.key];
+function paramValueFor(style: StyleDef, p: ParamDef): ParamValue {
+  let v = knobBucketFor(style)[p.key];
   if (v === undefined) v = p.default;
   if (p.options && p.options.length && !p.options.some((o) => String(o.value) === String(v))) {
     v = p.default;
   }
   return v;
+}
+
+function paramValue(p: ParamDef): ParamValue {
+  return paramValueFor(styleById(state.styleId), p);
 }
 
 function buildKnobs(): void {
@@ -375,6 +398,7 @@ function buildKnobs(): void {
       row.appendChild(sel);
       sel.addEventListener("change", () => {
         persist(p.type === "int" ? parseInt(sel.value, 10) : sel.value);
+        if (p.key === "palette") state.paletteBeforeEdit = null;
         updateKnobVisibility();
         updateCustomPaletteVisibility();
         scheduleRender();
@@ -408,36 +432,31 @@ function updateKnobVisibility(): void {
   styleParams(style).forEach((p) => {
     const row = document.getElementById(`knob-${p.key}`);
     if (!row || !p.visibleWhen) return;
-    const dep = p.visibleWhen.param;
-    let val: ParamValue | null;
-    if (dep in style.fixed) {
-      val = (style.fixed as Record<string, ParamValue>)[dep];
-    } else {
-      const inp = document.getElementById(`param-${dep}`) as HTMLInputElement | HTMLSelectElement | null;
-      val = inp ? (inp instanceof HTMLInputElement && inp.type === "checkbox" ? inp.checked : inp.value) : null;
-    }
-    const visible = p.visibleWhen.equals.some((e) => String(e) === String(val));
+    const conds = Array.isArray(p.visibleWhen) ? p.visibleWhen : [p.visibleWhen];
+    const visible = conds.every((cond) => {
+      const dep = cond.param;
+      let val: ParamValue | null;
+      if (dep in style.fixed) {
+        val = (style.fixed as Record<string, ParamValue>)[dep];
+      } else {
+        const inp = document.getElementById(`param-${dep}`) as HTMLInputElement | HTMLSelectElement | null;
+        val = inp ? (inp instanceof HTMLInputElement && inp.type === "checkbox" ? inp.checked : inp.value) : null;
+      }
+      return cond.equals.some((e) => String(e) === String(val));
+    });
     row.classList.toggle("hidden", !visible);
   });
 }
 
-function gatherValues(): Record<string, ParamValue> {
-  const style = styleById(state.styleId);
+/** A style's full parameter set: its fixed values, else the knob bucket (which
+ *  every knob writes on input), else the schema default. Reads no DOM, so the
+ *  variant grid can evaluate styles that aren't on screen. */
+function valuesFor(style: StyleDef): Record<string, ParamValue> {
   const out: Record<string, ParamValue> = {};
   styleParams(style).forEach((p) => {
-    if (p.key in style.fixed) {
-      out[p.key] = (style.fixed as Record<string, ParamValue>)[p.key];
-      return;
-    }
-    const inp = document.getElementById(`param-${p.key}`) as HTMLInputElement | HTMLSelectElement | null;
-    if (!inp) {
-      out[p.key] = paramValue(p);
-      return;
-    }
-    if (p.type === "bool") out[p.key] = (inp as HTMLInputElement).checked;
-    else if (p.type === "int") out[p.key] = parseInt(inp.value, 10);
-    else if (p.type === "float") out[p.key] = parseFloat(inp.value);
-    else out[p.key] = inp.value;
+    out[p.key] = p.key in style.fixed
+      ? (style.fixed as Record<string, ParamValue>)[p.key]
+      : paramValueFor(style, p);
   });
   return out;
 }
@@ -469,19 +488,26 @@ function toRenderOptions(v: Record<string, ParamValue>): RenderOptions {
       candidates: num("candidates", 0) || undefined, // 0 ⇒ let the renderer pick 2×palette
       ditherStrength: num("dither_strength", 0.8),
       serpentine: v.serpentine !== false, // default on
+      spread: num("spread", 0),
     },
   };
 }
 
 // ── local rasterisation (replaces server resize + asset fetch) ─────────────────
 /** Draw the source into an offscreen canvas at the output size and read pixels.
- *  `fullRes` ignores the output-size setting (depixelate needs the native grid). */
-function rasterizeSource(fullRes = false): Raster {
-  const { maxW, maxH, fit } = setupBucket();
+ *  `fullRes` ignores the output-size setting (depixelate needs the native grid).
+ *  `memo`, when given, reuses rasters across calls with the same geometry (the
+ *  variant grid renders ~20 styles from the same few rasters; renderers never
+ *  write to their input). */
+function rasterizeSource(setup: SetupState, fullRes = false, memo?: Map<string, Raster>): Raster {
+  const { maxW, maxH, fit } = setup;
   const sw = state.sourceW;
   const sh = state.sourceH;
   const mw = fullRes || !(maxW && maxW > 0) ? null : maxW;
   const mh = fullRes || !(maxH && maxH > 0) ? null : maxH;
+  const key = `${mw}|${mh}|${fit}`;
+  const hit = memo?.get(key);
+  if (hit) return hit;
   const { canvasW, canvasH, drawW, drawH, dx, dy } = boxFit(sw, sh, mw, mh, fit, false);
 
   const cv = state.offscreen ?? (state.offscreen = document.createElement("canvas"));
@@ -493,13 +519,169 @@ function rasterizeSource(fullRes = false): Raster {
   ctx.clearRect(0, 0, canvasW, canvasH);
   ctx.drawImage(state.source!, dx, dy, drawW, drawH);
   const data = ctx.getImageData(0, 0, canvasW, canvasH);
-  return { width: canvasW, height: canvasH, data: data.data };
+  const raster = { width: canvasW, height: canvasH, data: data.data };
+  memo?.set(key, raster);
+  return raster;
+}
+
+// ── render one style (shared by the main preview and the variant grid) ────────
+interface StyleRender {
+  raster: Raster; // the input, for proof metrics
+  res: RenderResult;
+  info: string; // caption suffix (repixel candidates / knit stats)
+  swatchCount?: number;
+  knit?: RenderState["knit"];
+  halftone?: Pick<HalftoneResult, "plates" | "screen" | "cell">;
+  glyphText?: string;
+}
+
+function renderStyle(
+  style: StyleDef,
+  vals: Record<string, ParamValue>,
+  setup: SetupState,
+  memo?: Map<string, Raster>,
+): StyleRender {
+  // Depixelate, Repixel, and Knit derive their own resolution from the full-res
+  // grid, so they must see the source at native size (not the output-downscaled
+  // raster). Knit also owns its exact chart size and is never conformed below.
+  const nativeRes =
+    style.renderer === "depixelate" ||
+    style.renderer === "repixel" ||
+    style.renderer === "knit";
+  const raster = rasterizeSource(setup, nativeRes, memo);
+  const out: Omit<StyleRender, "res"> = { raster, info: "" };
+  let res: RenderResult;
+  if (style.renderer === "halftone") {
+    const hres = renderHalftone(raster, {
+      separation: vals.separation as "spot" | "cmyk",
+      screen: vals.screen as "am" | "fm" | "hybrid",
+      cell: numParam(vals, "cell", 8),
+      angle: numParam(vals, "angle", 45),
+      dotShape: vals.dot_shape as "round" | "square" | "line",
+      dotGain: numParam(vals, "dot_gain", 0),
+      inkColor: String(vals.ink_color ?? "#1c1712"),
+      paperColor: String(vals.paper_color ?? "#f4ebd9"),
+      seed: SEED,
+    });
+    res = hres;
+    out.halftone = hres;
+  } else if (style.renderer === "depixelate") {
+    res = renderDepixelate(raster, {
+      block: numParam(vals, "block", 2),
+      tau: numParam(vals, "tau", 45),
+      pitch: numParam(vals, "pitch", 0),
+      palette: vals.palette as DepixelateOptions["palette"],
+      colors: numParam(vals, "colors", 4),
+      inkColor: String(vals.ink_color ?? "#161616"),
+      paperColor: String(vals.paper_color ?? "#f4ebd9"),
+      keepMarks: vals.keep_marks === true,
+      fillMult: numParam(vals, "fill_mult", 1),
+      pins: state.pins,
+    });
+  } else if (style.renderer === "repixel") {
+    const repixelOpts: RepixelOptions = {
+      target: vals.target as RepixelOptions["target"],
+      pitch: numParam(vals, "pitch", 0),
+      tau: numParam(vals, "tau", 45),
+      minLit: numParam(vals, "min_lit", 2),
+      shade: vals.shade !== false,
+      palette: vals.palette as RepixelOptions["palette"],
+      colors: numParam(vals, "colors", 6),
+      inkColor: String(vals.ink_color ?? "#161616"),
+      paperColor: String(vals.paper_color ?? "#f4ebd9"),
+      bgMode: vals.bg_mode as RepixelOptions["bgMode"],
+      bgColor: String(vals.bg_color ?? "#181818"),
+      spriteSat: numParam(vals, "sprite_sat", 0.3),
+      eyeLuma: numParam(vals, "eye_luma", 45),
+      pins: state.pins,
+    };
+    res = renderRepixel(raster, repixelOpts);
+    // Glyph text needs a NATIVE 1px/cell grid (the 2x4 braille grouping). Composite
+    // renders at source resolution (gapped dots), so derive its glyph text from a
+    // separate fine pass rather than from `res`.
+    out.glyphText = toGlyphText(
+      vals.target === "composite"
+        ? renderRepixel(raster, { ...repixelOpts, target: "fine" })
+        : res,
+    );
+    // Candidate pixel sizes for the readout — the image may carry two scales.
+    const cand = detectCandidates(raster);
+    const star = (t: string) => (vals.target === t ? "●" : "○");
+    out.info =
+      ` · ${star("fine")} fine ${cand.fine.toFixed(1)}px · ` +
+      `${star("subject")} subject ${cand.subject.toFixed(1)}px`;
+  } else if (style.renderer === "block_mosaic") {
+    res = renderBlockMosaic(raster, {
+      block: numParam(vals, "block", 2),
+      cell: numParam(vals, "cell", 6),
+      colors: numParam(vals, "colors", 4),
+      palette: vals.palette as BlockMosaicOptions["palette"],
+      inkColor: String(vals.ink_color ?? "#161616"),
+      paperColor: String(vals.paper_color ?? "#f4ebd9"),
+      library: vals.library as BlockMosaicOptions["library"],
+      learn: numParam(vals, "learn", 6),
+      libraryBias: numParam(vals, "library_bias", 0.5),
+      method: vals.method as BlockMosaicOptions["method"],
+      contrast: numParam(vals, "contrast", 1),
+      midpoint: numParam(vals, "midpoint", 0.5),
+      pins: state.pins,
+    });
+  } else if (style.renderer === "knit") {
+    const kres = renderKnit(raster, {
+      stitches: setup.maxW && setup.maxW > 0 ? setup.maxW : 200,
+      rows: setup.maxH && setup.maxH > 0 ? setup.maxH : undefined,
+      rowGauge: numParam(vals, "row_gauge", 1.4),
+      cell: numParam(vals, "cell", 8),
+      colors: numParam(vals, "colors", 5),
+      palette: vals.palette as KnitOptions["palette"],
+      inkColor: String(vals.ink_color ?? "#161616"),
+      paperColor: String(vals.paper_color ?? "#f4ebd9"),
+      method: vals.method as KnitOptions["method"],
+      symbols: vals.symbols as KnitOptions["symbols"],
+      grid: vals.grid as KnitOptions["grid"],
+      tidy: vals.tidy === true,
+      contrast: numParam(vals, "contrast", 1),
+      midpoint: numParam(vals, "midpoint", 0.5),
+      pins: state.pins,
+    });
+    res = kres;
+    out.swatchCount = kres.yarns.length;
+    out.knit = {
+      cols: kres.stitchesWide,
+      rows: kres.rowsTall,
+      cell: kres.cellSize,
+      stitchIdx: kres.stitchIndices,
+      symbols: kres.symbols,
+      symbolMode: (vals.symbols as KnitSymbolMode) ?? "cells",
+    };
+    const n = kres.yarns.length;
+    const stats = kres.stranding;
+    out.info =
+      ` · ${kres.stitchesWide} × ${kres.rowsTall} sts · ${n} yarn${n === 1 ? "" : "s"}` +
+      ` · max float ${stats.maxFloat}` +
+      ` · max ${stats.maxYarnsPerRow} yarns/row`;
+  } else {
+    res = renderToneDither(raster, toRenderOptions(vals));
+  }
+  // The grid renderers detect + tile on the native grid, so their raw output
+  // size is decoupled from the output-size control; scale to the requested size
+  // so the preview and exported PNG honour it (other renderers already do).
+  // EXCEPT composite: it draws gapped braille dots at source resolution, and
+  // nearest-neighbour downscaling would alias the dots away — so it keeps native.
+  // Knit is excluded too: it owns its exact chart size (cell-px stitches + grid).
+  const conformable = style.renderer === "depixelate" || style.renderer === "repixel";
+  if (conformable && vals.target !== "composite") {
+    const { maxW, maxH, fit } = setup;
+    res = conformIndexed(res, maxW && maxW > 0 ? maxW : null, maxH && maxH > 0 ? maxH : null, fit);
+  }
+  return { ...out, res };
 }
 
 // ── render the preview (local) ────────────────────────────────────────────────
 function scheduleRender(): void {
   if (state.renderDebounce) clearTimeout(state.renderDebounce);
   state.renderDebounce = setTimeout(renderFocus, 90);
+  scheduleGrid();
 }
 
 function renderFocus(): void {
@@ -510,168 +692,32 @@ function renderFocus(): void {
     if (!state.source) return;
     state.renderStart = performance.now();
     const style = styleById(state.styleId);
-    const vals = gatherValues();
-    let repixelInfo = ""; // candidate pixel-size readout (repixel only)
-    let knitInfo = ""; // stitch-count / yarn readout (knit only)
-    let swatchCount: number | undefined;
-    let knitMeta: RenderState["knit"];
-    let halftoneMeta: Pick<HalftoneResult, "plates" | "screen" | "cell"> | undefined;
-    state.glyphText = ""; // reset; set below only for the repixel renderer
-    // Depixelate, Repixel, and Knit derive their own resolution from the full-res
-    // grid, so they must see the source at native size (not the output-downscaled
-    // raster). Knit also owns its exact chart size and is never conformed below.
-    const nativeRes =
-      style.renderer === "depixelate" ||
-      style.renderer === "repixel" ||
-      style.renderer === "knit";
-    const raster = rasterizeSource(nativeRes);
-    let res: ReturnType<typeof renderToneDither>;
-    if (style.renderer === "halftone") {
-      const hres = renderHalftone(raster, {
-        separation: vals.separation as "spot" | "cmyk",
-        screen: vals.screen as "am" | "fm" | "hybrid",
-        cell: numParam(vals, "cell", 8),
-        angle: numParam(vals, "angle", 45),
-        dotShape: vals.dot_shape as "round" | "square" | "line",
-        dotGain: numParam(vals, "dot_gain", 0),
-        inkColor: String(vals.ink_color ?? "#1c1712"),
-        paperColor: String(vals.paper_color ?? "#f4ebd9"),
-        seed: SEED,
-      });
-      res = hres;
-      halftoneMeta = hres;
-    } else if (style.renderer === "depixelate") {
-      res = renderDepixelate(raster, {
-        block: numParam(vals, "block", 2),
-        tau: numParam(vals, "tau", 45),
-        pitch: numParam(vals, "pitch", 0),
-        palette: vals.palette as DepixelateOptions["palette"],
-        colors: numParam(vals, "colors", 4),
-        inkColor: String(vals.ink_color ?? "#161616"),
-        paperColor: String(vals.paper_color ?? "#f4ebd9"),
-        keepMarks: vals.keep_marks === true,
-        fillMult: numParam(vals, "fill_mult", 1),
-        pins: state.pins,
-      });
-    } else if (style.renderer === "repixel") {
-      const repixelOpts: RepixelOptions = {
-        target: vals.target as RepixelOptions["target"],
-        pitch: numParam(vals, "pitch", 0),
-        tau: numParam(vals, "tau", 45),
-        minLit: numParam(vals, "min_lit", 2),
-        shade: vals.shade !== false,
-        palette: vals.palette as RepixelOptions["palette"],
-        colors: numParam(vals, "colors", 6),
-        inkColor: String(vals.ink_color ?? "#161616"),
-        paperColor: String(vals.paper_color ?? "#f4ebd9"),
-        bgMode: vals.bg_mode as RepixelOptions["bgMode"],
-        bgColor: String(vals.bg_color ?? "#181818"),
-        spriteSat: numParam(vals, "sprite_sat", 0.3),
-        eyeLuma: numParam(vals, "eye_luma", 45),
-        pins: state.pins,
-      };
-      res = renderRepixel(raster, repixelOpts);
-      // Glyph text needs a NATIVE 1px/cell grid (the 2x4 braille grouping). Composite
-      // renders at source resolution (gapped dots), so derive its glyph text from a
-      // separate fine pass rather than from `res`.
-      state.glyphText = toGlyphText(
-        vals.target === "composite"
-          ? renderRepixel(raster, { ...repixelOpts, target: "fine" })
-          : res,
-      );
-      // Candidate pixel sizes for the readout — the image may carry two scales.
-      const cand = detectCandidates(raster);
-      const star = (t: string) => (vals.target === t ? "●" : "○");
-      repixelInfo =
-        ` · ${star("fine")} fine ${cand.fine.toFixed(1)}px · ` +
-        `${star("subject")} subject ${cand.subject.toFixed(1)}px`;
-    } else if (style.renderer === "block_mosaic") {
-      res = renderBlockMosaic(raster, {
-        block: numParam(vals, "block", 2),
-        cell: numParam(vals, "cell", 6),
-        colors: numParam(vals, "colors", 4),
-        palette: vals.palette as BlockMosaicOptions["palette"],
-        inkColor: String(vals.ink_color ?? "#161616"),
-        paperColor: String(vals.paper_color ?? "#f4ebd9"),
-        library: vals.library as BlockMosaicOptions["library"],
-        learn: numParam(vals, "learn", 6),
-        libraryBias: numParam(vals, "library_bias", 0.5),
-        method: vals.method as BlockMosaicOptions["method"],
-        contrast: numParam(vals, "contrast", 1),
-        midpoint: numParam(vals, "midpoint", 0.5),
-        pins: state.pins,
-      });
-    } else if (style.renderer === "knit") {
-      const setup = setupBucket();
-      const kres = renderKnit(raster, {
-        stitches: setup.maxW && setup.maxW > 0 ? setup.maxW : 200,
-        rows: setup.maxH && setup.maxH > 0 ? setup.maxH : undefined,
-        rowGauge: numParam(vals, "row_gauge", 1.4),
-        cell: numParam(vals, "cell", 8),
-        colors: numParam(vals, "colors", 5),
-        palette: vals.palette as KnitOptions["palette"],
-        inkColor: String(vals.ink_color ?? "#161616"),
-        paperColor: String(vals.paper_color ?? "#f4ebd9"),
-        method: vals.method as KnitOptions["method"],
-        symbols: vals.symbols as KnitOptions["symbols"],
-        grid: vals.grid as KnitOptions["grid"],
-        tidy: vals.tidy === true,
-        contrast: numParam(vals, "contrast", 1),
-        midpoint: numParam(vals, "midpoint", 0.5),
-        pins: state.pins,
-      });
-      res = kres;
-      swatchCount = kres.yarns.length;
-      const symbolMode = (vals.symbols as KnitSymbolMode) ?? "cells";
-      knitMeta = {
-        cols: kres.stitchesWide,
-        rows: kres.rowsTall,
-        cell: kres.cellSize,
-        stitchIdx: kres.stitchIndices,
-        symbols: kres.symbols,
-        symbolMode,
-      };
-      const n = kres.yarns.length;
-      const stats = kres.stranding;
-      knitInfo =
-        ` · ${kres.stitchesWide} × ${kres.rowsTall} sts · ${n} yarn${n === 1 ? "" : "s"}` +
-        ` · max float ${stats.maxFloat}` +
-        ` · max ${stats.maxYarnsPerRow} yarns/row`;
-    } else {
-      res = renderToneDither(raster, toRenderOptions(vals));
-    }
-    // The grid renderers detect + tile on the native grid, so their raw output
-    // size is decoupled from the output-size control; scale to the requested size
-    // so the preview and exported PNG honour it (other renderers already do).
-    // EXCEPT composite: it draws gapped braille dots at source resolution, and
-    // nearest-neighbour downscaling would alias the dots away — so it keeps native.
-    // Knit is excluded too: it owns its exact chart size (cell-px stitches + grid).
-    const conformable = style.renderer === "depixelate" || style.renderer === "repixel";
-    if (conformable && vals.target !== "composite") {
-      const { maxW, maxH, fit } = setupBucket();
-      res = conformIndexed(res, maxW && maxW > 0 ? maxW : null, maxH && maxH > 0 ? maxH : null, fit);
-    }
+    const vals = valuesFor(style);
+    const out = renderStyle(style, vals, setupBucket());
+    const res = out.res;
+    state.glyphText = out.glyphText ?? "";
     state.render = {
       w: res.width, h: res.height, idx: res.indices, palette: res.palette,
-      swatchCount, knit: knitMeta,
-      plates: halftoneMeta?.plates, screen: halftoneMeta?.screen, cell: halftoneMeta?.cell,
+      swatchCount: out.swatchCount, knit: out.knit,
+      plates: out.halftone?.plates, screen: out.halftone?.screen, cell: out.halftone?.cell,
     };
     state.hoverIdx = null;
 
-    const cv = $<HTMLCanvasElement>("#bigCanvas");
-    cv.width = res.width;
-    cv.height = res.height;
+    const native = nativeCanvas();
+    native.width = res.width;
+    native.height = res.height;
     redrawCanvas();
     buildSwatches();
     buildPins();
 
     const elapsed = Math.round(performance.now() - state.renderStart);
-    const name = styleById(state.styleId).label.split(" — ")[0];
-    // repixelInfo is built only from numbers + bullet glyphs (no user input).
-    $("#bigCaption").innerHTML = `<b>${name}</b> · ${res.width} × ${res.height} px${repixelInfo}${knitInfo}`;
+    const name = style.label.split(" — ")[0];
+    // out.info is built only from numbers + bullet glyphs (no user input).
+    $("#bigCaption").innerHTML = `<b>${name}</b> · ${res.width} × ${res.height} px${out.info}`;
     $("#specDims").textContent = `${res.width} × ${res.height}`;
+    updateScaleUI();
     $("#specRender").textContent = `${elapsed} ms`;
-    const proof = computeProofMetrics(raster, res);
+    const proof = computeProofMetrics(out.raster, res);
     $("#specColors").textContent = proof ? String(proof.usedColors) : "n/a";
     $("#specError").textContent = proof ? `ΔE ${proof.perceptualError.toFixed(1)}` : "n/a";
     $("#specTone").textContent = proof ? `${proof.lowFrequencyError.toFixed(1)}%` : "n/a";
@@ -680,11 +726,207 @@ function renderFocus(): void {
     $("#plateLoading").hidden = true;
 
     applyZoom();
-    updateExport();
+    scheduleExport();
   });
 }
 
+// ── variant grid ("All styles") ───────────────────────────────────────────────
+// Every style rendered for the current image through renderStyle — the same path
+// as the main preview — so a card shows what clicking it will open. Outputs
+// larger than GRID_MAX_SIDE are rendered smaller (and the hint says so), which
+// keeps a full pass to roughly a second.
+const GRID_MAX_SIDE = 600;
+
+/** The image output box, shrunk to GRID_MAX_SIDE. Knit keeps its stitch counts. */
+function gridSetup(style: StyleDef): { setup: SetupState; reduced: boolean } {
+  const setup = setupFor(style);
+  if (setupKey(style) === "knit") return { setup, reduced: false };
+  const mw = setup.maxW && setup.maxW > 0 ? setup.maxW : null;
+  const mh = setup.maxH && setup.maxH > 0 ? setup.maxH : null;
+  const { canvasW, canvasH } = boxFit(state.sourceW, state.sourceH, mw, mh, setup.fit, false);
+  const long = Math.max(canvasW, canvasH);
+  if (long <= GRID_MAX_SIDE) return { setup, reduced: false };
+  // Shrink the box the output actually occupies (fit never upscales, so the
+  // requested max W can be far larger than the real output).
+  const f = GRID_MAX_SIDE / long;
+  return {
+    setup: {
+      maxW: Math.max(16, Math.round(canvasW * f)),
+      maxH: Math.max(16, Math.round(canvasH * f)),
+      fit: setup.fit,
+    },
+    reduced: true,
+  };
+}
+
+function setView(view: "single" | "grid"): void {
+  state.view = view;
+  $$("#viewGroup button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
+  $("#variantView").hidden = view !== "grid";
+  $("#singleView").hidden = view !== "single";
+  if (view === "grid") {
+    markSelectedVariant();
+    if (state.gridDirty) renderGrid();
+  } else {
+    applyZoom(); // the lightbox had no size while hidden
+  }
+}
+
+function bindView(): void {
+  $$("#viewGroup button").forEach((b) =>
+    b.addEventListener("click", () => setView(b.dataset.view === "grid" ? "grid" : "single")),
+  );
+}
+
+/** One card per style, grouped by intent. Built once per source image. */
+function buildGrid(): void {
+  const view = $("#variantView");
+  view.innerHTML = "";
+  const { setup } = gridSetup(STYLES[0]);
+  const box = boxFit(
+    state.sourceW, state.sourceH,
+    setup.maxW && setup.maxW > 0 ? setup.maxW : null,
+    setup.maxH && setup.maxH > 0 ? setup.maxH : null,
+    setup.fit, false,
+  );
+  // Preview boxes follow the output's aspect, clamped so extreme panoramas or
+  // phone screenshots don't make absurd cards; the canvas is contained inside.
+  const aspect = Math.max(0.6, Math.min(1.8, box.canvasW / box.canvasH));
+  (Object.keys(INTENTS) as StyleIntent[]).forEach((intent) => {
+    const styles = STYLES.filter((s) => s.intent === intent);
+    if (!styles.length) return;
+    const group = document.createElement("section");
+    group.className = "variant-group";
+    const head = document.createElement("div");
+    head.className = "variant-group-head";
+    const h = document.createElement("h3");
+    h.textContent = INTENTS[intent].label;
+    const blurb = document.createElement("span");
+    blurb.textContent = INTENTS[intent].blurb;
+    head.append(h, blurb);
+    const grid = document.createElement("div");
+    grid.className = "variant-grid";
+    styles.forEach((style) => {
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "card stale";
+      card.dataset.style = style.id;
+      const preview = document.createElement("div");
+      preview.className = "card-preview";
+      preview.style.aspectRatio = String(aspect);
+      const spin = document.createElement("div");
+      spin.className = "spinner";
+      preview.append(spin);
+      const label = document.createElement("div");
+      label.className = "card-label";
+      const name = document.createElement("div");
+      name.className = "name";
+      name.textContent = style.label.split(" — ")[0];
+      const desc = document.createElement("div");
+      desc.className = "desc";
+      desc.textContent = style.description;
+      label.append(name, desc);
+      card.append(preview, label);
+      card.addEventListener("click", () => {
+        applyStyle(style.id);
+        setView("single");
+      });
+      grid.append(card);
+    });
+    group.append(head, grid);
+    view.append(group);
+  });
+  state.gridDirty = true;
+  markSelectedVariant();
+}
+
+function markSelectedVariant(): void {
+  $$("#variantView .card").forEach((c) => c.classList.toggle("selected", c.dataset.style === state.styleId));
+}
+
+/** Knob, palette, pin, or size changes re-render the grid once things settle.
+ *  Cards dim immediately so a stale thumbnail never reads as current. */
+function scheduleGrid(): void {
+  state.gridDirty = true;
+  state.gridSeq++; // cancel any pass in flight
+  if (state.view !== "grid") return;
+  $$("#variantView .card").forEach((c) => c.classList.add("stale"));
+  if (state.gridTimer) clearTimeout(state.gridTimer);
+  state.gridTimer = setTimeout(renderGrid, 250);
+}
+
+let gridNative: HTMLCanvasElement | null = null;
+
+function paintCard(card: HTMLElement, res: RenderResult): void {
+  const src = (gridNative ??= document.createElement("canvas"));
+  src.width = res.width;
+  src.height = res.height;
+  src.getContext("2d")!.putImageData(new ImageData(paintIndices(res) as Uint8ClampedArray<ArrayBuffer>, res.width, res.height), 0, 0);
+  const box = card.querySelector<HTMLElement>(".card-preview")!;
+  let cv = box.querySelector("canvas");
+  if (!cv) {
+    box.innerHTML = "";
+    cv = document.createElement("canvas");
+    box.append(cv);
+  }
+  const scale = Math.min(box.clientWidth / res.width, box.clientHeight / res.height);
+  cv.style.width = `${paintScaled(cv, src, scale * (window.devicePixelRatio || 1)).toFixed(3)}px`;
+  cv.style.height = "auto";
+  card.classList.remove("stale");
+}
+
+/** Render every card, one style per task so input stays responsive between
+ *  them. A newer pass (or leaving the grid) cancels this one. */
+function renderGrid(): void {
+  if (!state.source || state.view !== "grid") return;
+  if (state.gridTimer) clearTimeout(state.gridTimer);
+  state.gridDirty = false;
+  const seq = ++state.gridSeq;
+  const memo = new Map<string, Raster>();
+  // The selected style first, then the rest in on-screen order.
+  const order = [styleById(state.styleId), ...STYLES.filter((s) => s.id !== state.styleId)];
+  const image = gridSetup(STYLES[0]);
+  const ref = boxFit(
+    state.sourceW, state.sourceH,
+    image.setup.maxW && image.setup.maxW > 0 ? image.setup.maxW : null,
+    image.setup.maxH && image.setup.maxH > 0 ? image.setup.maxH : null,
+    image.setup.fit, false,
+  );
+  $("#gridHint").textContent = image.reduced
+    ? `Previews at ${ref.canvasW} × ${ref.canvasH} px — your output is larger, so its grain is finer`
+    : `${ref.canvasW} × ${ref.canvasH} px · click a style to open it`;
+  let i = 0;
+  const step = () => {
+    if (seq !== state.gridSeq || state.view !== "grid") {
+      if (seq === state.gridSeq) state.gridDirty = true; // left mid-pass
+      return;
+    }
+    const style = order[i++];
+    if (!style) return;
+    const card = document.querySelector<HTMLElement>(`#variantView .card[data-style="${style.id}"]`);
+    if (card) {
+      try {
+        let vals = valuesFor(style);
+        // A thumbnail chart: small cells, no grid lines or symbols to drown it.
+        if (style.renderer === "knit") vals = { ...vals, cell: 2, grid: "none", symbols: "none" };
+        paintCard(card, renderStyle(style, vals, gridSetup(style).setup, memo).res);
+      } catch {
+        card.classList.remove("stale");
+        const box = card.querySelector(".card-preview")!;
+        box.innerHTML = '<div class="card-fail">couldn\'t render</div>';
+      }
+    }
+    setTimeout(step, 0);
+  };
+  setTimeout(step, 0);
+}
+
 // ── canvas paint (recolour + hover isolation) ─────────────────────────────────
+function nativeCanvas(): HTMLCanvasElement {
+  return (state.native ??= document.createElement("canvas"));
+}
+
+/** Paint the render into the native canvas, then present it on screen. */
 function redrawCanvas(): void {
   const R = state.render;
   if (!R) return;
@@ -727,9 +969,65 @@ function redrawCanvas(): void {
     out[o + 2] = c[2];
     out[o + 3] = 255;
   }
-  const ctx = $<HTMLCanvasElement>("#bigCanvas").getContext("2d")!;
+  const ctx = nativeCanvas().getContext("2d")!;
   ctx.putImageData(new ImageData(out, W, H), 0, 0);
   drawKnitSymbols(ctx, R, oc);
+  presentCanvas();
+}
+
+/** Draw `src` into `dst` at `dev` device pixels per source pixel, faithfully:
+ *   - whole-number enlargement → `dst` is a 1:1 copy, enlarged by CSS (pixelated);
+ *   - fractional enlargement → "sharp bilinear": nearest-neighbour up to the next
+ *     whole multiple, then a smooth reduction to the exact size. Plain fractional
+ *     nearest-neighbour makes some dots 1px and some 2px, which reads as banding;
+ *   - reduction → high-quality smoothing, i.e. the tone the eye sees at that
+ *     size. Nearest-neighbour would drop pixels and show moiré that isn't in the
+ *     exported file.
+ *  Resizes `dst` and returns its CSS width. */
+let scaleTmp: HTMLCanvasElement | null = null;
+function paintScaled(dst: HTMLCanvasElement, src: HTMLCanvasElement, dev: number): number {
+  const dpr = window.devicePixelRatio || 1;
+  const whole = dev >= 1 - 1e-3 && Math.abs(dev - Math.round(dev)) < 1e-3;
+  const w = whole ? src.width : Math.max(1, Math.round(src.width * dev));
+  const h = whole ? src.height : Math.max(1, Math.round(src.height * dev));
+  if (dst.width !== w || dst.height !== h) {
+    dst.width = w;
+    dst.height = h;
+  }
+  const ctx = dst.getContext("2d")!;
+  ctx.clearRect(0, 0, w, h);
+  if (whole) {
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(src, 0, 0);
+    return (src.width * Math.round(dev)) / dpr;
+  }
+  let from: HTMLCanvasElement = src;
+  if (dev > 1) {
+    const m = Math.ceil(dev);
+    const tmp = (scaleTmp ??= document.createElement("canvas"));
+    tmp.width = src.width * m;
+    tmp.height = src.height * m;
+    const t = tmp.getContext("2d")!;
+    t.imageSmoothingEnabled = false;
+    t.drawImage(src, 0, 0, tmp.width, tmp.height);
+    from = tmp;
+  }
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(from, 0, 0, w, h);
+  return w / dpr;
+}
+
+/** Show the native render on #bigCanvas at the current zoom. */
+function presentCanvas(): void {
+  const src = state.native;
+  if (!src || !src.width || !src.height) return;
+  const cv = $<HTMLCanvasElement>("#bigCanvas");
+  const scale = displayScale(src.width, src.height);
+  const cssW = paintScaled(cv, src, scale * (window.devicePixelRatio || 1));
+  cv.style.width = `${cssW.toFixed(3)}px`;
+  cv.style.height = "auto";
+  $("#zoomVal").textContent = `${Math.round(scale * 100)}%`;
 }
 
 function drawKnitSymbols(ctx: CanvasRenderingContext2D, R: RenderState, palette: RGB[]): void {
@@ -828,23 +1126,59 @@ function buildSwatches(): void {
     btn.addEventListener("click", () => openRecolor(hex, i));
     wrap.appendChild(btn);
   });
-  $("#resetColors").hidden = Object.keys(state.colorMap).length === 0;
+  updateResetButton();
+}
+
+/** The palette block's reset undoes whichever kind of edit is active: a
+ *  remap of the result (non-palette-aware renderers) or a swatch edit that
+ *  promoted the palette to exact inks (tone dither). */
+function canRevertPalette(): boolean {
+  return rendererKey() === "tone_dither" && state.paletteBeforeEdit !== null;
+}
+
+function updateResetButton(): void {
+  const btn = $("#resetColors");
+  const revert = canRevertPalette();
+  btn.hidden = Object.keys(state.colorMap).length === 0 && !revert;
+  btn.textContent = revert ? "revert" : "reset";
+  btn.title = revert ? `Back to the ${state.paletteBeforeEdit} palette` : "Undo colour remaps";
+}
+
+function revertPalette(): void {
+  const mode = state.paletteBeforeEdit;
+  if (!mode) return;
+  state.paletteBeforeEdit = null;
+  knobBucket().palette = mode;
+  const sel = document.getElementById("param-palette") as HTMLSelectElement | null;
+  if (sel) sel.value = mode;
+  updateKnobVisibility();
+  updateCustomPaletteVisibility();
+  scheduleRender();
 }
 
 function openRecolor(hex: string, index: number): void {
   const picker = $<HTMLInputElement>("#swatchPicker");
   picker.value = state.colorMap[hex] || hex;
+  // The inks as they were when the picker opened: every input edits slot
+  // `index` of this, not of the latest render (which may have merged inks).
+  const base = state.render?.palette.map((c) => [...c] as RGB) ?? [];
   picker.oninput = () => {
     if (rendererKey() === "tone_dither" && state.render) {
       // Palette-aware renderers derive their mixing weights from the actual ink
       // colours. Promote the visible palette to an exact palette and recalculate;
       // repainting the old index map would make Knoll/Yliluoma/EMA untruthful.
-      state.customPalette = state.render.palette.map((c) => [...c] as RGB);
+      const from = String(valuesFor(styleById(state.styleId)).palette);
+      if (from !== "custom") {
+        state.paletteBeforeEdit = from;
+        toast(`Now using exact inks — "revert" returns to ${from}`);
+      }
+      state.customPalette = base.map((c) => [...c] as RGB);
       state.customPalette[index] = parseColor(picker.value);
       knobBucket().palette = "custom";
       const paletteSelect = document.getElementById("param-palette") as HTMLSelectElement | null;
       if (paletteSelect) paletteSelect.value = "custom";
       syncCustomPaletteText();
+      updateKnobVisibility();
       updateCustomPaletteVisibility();
       scheduleRender();
       return;
@@ -852,7 +1186,7 @@ function openRecolor(hex: string, index: number): void {
     state.colorMap[hex] = picker.value;
     redrawCanvas();
     buildSwatches();
-    updateExport();
+    scheduleExport();
   };
   picker.click();
 }
@@ -982,18 +1316,93 @@ function bindPins(): void {
 }
 
 // ── export (local PNG + Web Crypto checksum) ──────────────────────────────────
+// Upscaled exports are capped so a big render × 8 can't allocate a canvas the
+// browser refuses (or a multi-hundred-MB PNG); larger scales are disabled.
+const EXPORT_SCALES = [1, 2, 4, 8];
+const EXPORT_MAX_SIDE = 8192;
+const EXPORT_MAX_PIXELS = 4096 * 4096;
+const EXPORT_FORMATS = [
+  { id: "Png", mime: "image/png", ext: "png", quality: undefined },
+  { id: "Webp", mime: "image/webp", ext: "webp", quality: 0.9 },
+  { id: "Jpeg", mime: "image/jpeg", ext: "jpg", quality: 0.85 },
+];
+
 function canvasBlob(canvas: HTMLCanvasElement, mime: string, quality?: number): Promise<Blob | null> {
   return new Promise((resolve) => canvas.toBlob(resolve, mime, quality));
 }
 
+function scaleFits(w: number, h: number, s: number): boolean {
+  return Math.max(w, h) * s <= EXPORT_MAX_SIDE && w * h * s * s <= EXPORT_MAX_PIXELS;
+}
+
+/** The multiplier actually applied: the requested one, stepped down until it
+ *  fits the caps. Knit charts already bake their scale into the cell size. */
+function effectiveExportScale(): number {
+  const R = state.render;
+  if (!R || R.knit) return 1;
+  let s = 1;
+  for (const c of EXPORT_SCALES) if (c <= state.exportScale && scaleFits(R.w, R.h, c)) s = c;
+  return s;
+}
+
+function bindExportScale(): void {
+  $$("#scaleGroup button").forEach((b) =>
+    b.addEventListener("click", () => {
+      state.exportScale = parseInt(b.dataset.scale || "1", 10);
+      updateScaleUI();
+      scheduleExport();
+    }),
+  );
+}
+
+function updateScaleUI(): void {
+  const R = state.render;
+  $("#scaleRow").hidden = !!R?.knit;
+  const eff = effectiveExportScale();
+  $$("#scaleGroup button").forEach((b) => {
+    const s = parseInt(b.dataset.scale || "1", 10);
+    const fits = !R || scaleFits(R.w, R.h, s);
+    (b as HTMLButtonElement).disabled = !fits;
+    b.title = fits ? "" : `Too large — over ${EXPORT_MAX_SIDE}px or ${EXPORT_MAX_PIXELS / 1e6 | 0} MP`;
+    b.classList.toggle("active", s === eff);
+  });
+  $("#specExport").textContent = R ? `${R.w * eff} × ${R.h * eff}${eff > 1 ? ` · ${eff}×` : ""}` : "—";
+}
+
+/** The native render, nearest-neighbour upscaled by the export scale. */
+function exportSource(): HTMLCanvasElement | null {
+  const src = state.native;
+  if (!src || !src.width) return null;
+  const s = effectiveExportScale();
+  if (s === 1) return src;
+  const cv = (state.exportCanvas ??= document.createElement("canvas"));
+  cv.width = src.width * s;
+  cv.height = src.height * s;
+  const ctx = cv.getContext("2d")!;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(src, 0, 0, cv.width, cv.height);
+  return cv;
+}
+
+/** Encoding three formats is the slow part of a knob tweak at large export
+ *  sizes, so wait for the knobs to settle. Until then the format cards are
+ *  disabled — a click must never download the previous render. */
+function scheduleExport(): void {
+  state.exportSeq++;
+  EXPORT_FORMATS.forEach((f) => {
+    const link = $(`#export${f.id}`);
+    link.classList.add("disabled", "pending");
+    $(`#size${f.id}`).textContent = "…";
+  });
+  if (state.exportTimer) clearTimeout(state.exportTimer);
+  state.exportTimer = setTimeout(() => void updateExport(), 220);
+}
+
 async function updateExport(): Promise<void> {
-  const cv = $<HTMLCanvasElement>("#bigCanvas");
+  const cv = exportSource();
+  if (!cv) return;
   const seq = ++state.exportSeq;
-  const formats = [
-    { id: "Png", mime: "image/png", ext: "png", quality: undefined },
-    { id: "Webp", mime: "image/webp", ext: "webp", quality: 0.9 },
-    { id: "Jpeg", mime: "image/jpeg", ext: "jpg", quality: 0.85 },
-  ];
+  const formats = EXPORT_FORMATS;
   const blobs = await Promise.all(formats.map((f) => canvasBlob(cv, f.mime, f.quality)));
   if (seq !== state.exportSeq) return;
   formats.forEach((format, i) => {
@@ -1004,6 +1413,7 @@ async function updateExport(): Promise<void> {
     if (old) URL.revokeObjectURL(old);
     if (!blob || (format.mime !== "image/png" && blob.type !== format.mime)) {
       link.classList.add("disabled");
+      link.classList.remove("pending");
       size.textContent = "unsupported";
       return;
     }
@@ -1011,7 +1421,7 @@ async function updateExport(): Promise<void> {
     state.exportUrls[format.ext] = url;
     link.href = url;
     link.download = exportFilename(format.ext);
-    link.classList.remove("disabled");
+    link.classList.remove("disabled", "pending");
     size.textContent = formatBytes(blob.size);
   });
   if (blobs[0]) void setChecksum(blobs[0]);
@@ -1032,7 +1442,8 @@ async function setChecksum(blob: Blob): Promise<void> {
 
 function exportFilename(ext = "png"): string {
   const base = state.sourceName.replace(/\.[^.]+$/, "") || "image";
-  const dims = state.render ? `_${state.render.w}x${state.render.h}` : "";
+  const s = effectiveExportScale();
+  const dims = state.render ? `_${state.render.w}x${state.render.h}${s > 1 ? `@${s}x` : ""}` : "";
   return `${base}_${state.styleId}${dims}.${ext}`;
 }
 
@@ -1047,11 +1458,22 @@ function bindZoom(): void {
   });
   $$(".zoom-step").forEach((b) =>
     b.addEventListener("click", () => {
-      if (state.zoomMode === "fit") state.zoomPct = 100;
+      const src = state.native;
+      if (!src || !src.width) return;
+      // Enlarged, step to the next whole multiple (crisp, uniform dots);
+      // reduced, step by ×1.25 / ×0.8.
+      const dpr = window.devicePixelRatio || 1;
+      const fit = fitScale(src.width, src.height);
+      const raw = displayScale(src.width, src.height) * dpr;
+      const dev = Math.abs(raw - Math.round(raw)) < 1e-6 ? Math.round(raw) : raw;
+      const up = parseInt(b.dataset.step || "0", 10) > 0;
+      let next: number;
+      if (up) next = dev >= 1 ? Math.floor(dev) + 1 : Math.min(1, dev * 1.25);
+      else next = dev > 1 ? Math.ceil(dev) - 1 : dev * 0.8;
       state.zoomMode = "manual";
-      const step = parseInt(b.dataset.step || "0", 10);
-      state.zoomPct = Math.max(25, Math.min(400, state.zoomPct + step * 25));
-      $<HTMLInputElement>("#zoomSlider").value = String(state.zoomPct);
+      // Beyond the slider's range so large renders can still reach 2×, 3× …
+      state.zoomPct = Math.max(10, Math.min(3200, (next / dpr / fit) * 100));
+      $<HTMLInputElement>("#zoomSlider").value = String(Math.round(state.zoomPct));
       $("#zoomFit").classList.remove("active");
       applyZoom();
     }),
@@ -1066,19 +1488,21 @@ function setZoomFit(): void {
   applyZoom();
 }
 
-function applyZoom(): void {
-  const cv = $<HTMLCanvasElement>("#bigCanvas");
-  const nw = cv.width;
-  const nh = cv.height;
-  if (!nw || !nh) return;
+/** CSS px per image px for the current zoom. */
+function fitScale(nw: number, nh: number): number {
   const lb = $(".lightbox");
   const availW = Math.max(80, lb.clientWidth - 40);
   const availH = Math.max(80, lb.clientHeight - 48);
-  const fitScale = Math.min(availW / nw, availH / nh);
-  const scale = state.zoomMode === "fit" ? fitScale : fitScale * (state.zoomPct / 100);
-  cv.style.width = Math.max(1, Math.round(nw * scale)) + "px";
-  cv.style.height = "auto";
-  $("#zoomVal").textContent = state.zoomMode === "fit" ? "fit" : `${state.zoomPct}%`;
+  return Math.min(availW / nw, availH / nh);
+}
+
+function displayScale(nw: number, nh: number): number {
+  const fit = fitScale(nw, nh);
+  return state.zoomMode === "fit" ? fit : fit * (state.zoomPct / 100);
+}
+
+function applyZoom(): void {
+  presentCanvas();
   updatePannable();
 }
 
@@ -1149,22 +1573,29 @@ function init(): void {
   updateOutputPanel();
   bindZoom();
   bindPan();
+  bindView();
   $("#resetColors").addEventListener("click", () => {
+    if (canRevertPalette()) {
+      revertPalette();
+      return;
+    }
     state.colorMap = {};
     state.hoverIdx = null;
     redrawCanvas();
     buildSwatches();
-    updateExport();
+    scheduleExport();
   });
+  bindExportScale();
   bindPins();
   bindCustomPalette();
   buildPins();
-  updateIntentUI();
+  updateStyleUI();
   $("#copyGlyphs").addEventListener("click", () => copyGlyphText());
   showStudio(false);
 
   let resizeRAF = 0;
   window.addEventListener("resize", () => {
+    if (state.view === "grid") scheduleGrid(); // thumbnails are painted at card size
     if (state.zoomMode !== "fit") return;
     cancelAnimationFrame(resizeRAF);
     resizeRAF = requestAnimationFrame(applyZoom);
