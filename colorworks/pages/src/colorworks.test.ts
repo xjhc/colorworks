@@ -23,6 +23,7 @@ import {
   oklabToRgb,
   kmeansPalette,
   spreadPalette,
+  sharpenRaster,
 } from "./colorworks";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -683,5 +684,54 @@ describe("spreadPalette (dither-aware extremes)", () => {
     };
     expect(span(0.5, "floyd_steinberg")).toBeGreaterThan(span(0, "floyd_steinberg"));
     expect(span(1, "flat")).toBeCloseTo(span(0, "flat"), 6);
+  });
+});
+
+describe("sharpenRaster (unsharp mask on luma)", () => {
+  // A soft vertical edge, S-shaped like a downscaled one: dark grey on the
+  // left, light grey on the right, centred between x = 7 and 8.
+  const edge = makeRaster(16, 4, (x) => {
+    const v = Math.round(70 + 110 / (1 + Math.exp(-(x - 7.5) * 1.2)));
+    return [v, v - 10, v - 20];
+  });
+  const px = (r: Raster, x: number) => [r.data[x * 4], r.data[x * 4 + 1], r.data[x * 4 + 2]];
+
+  it("returns the raster untouched at amount 0", () => {
+    expect(sharpenRaster(edge, 0)).toBe(edge);
+  });
+
+  it("steepens the edge and leaves flat areas alone", () => {
+    const out = sharpenRaster(edge, 1);
+    expect(px(out, 6)[0]).toBeLessThan(px(edge, 6)[0]); // dark shoulder darker
+    expect(px(out, 9)[0]).toBeGreaterThan(px(edge, 9)[0]); // light shoulder lighter
+    expect(px(out, 0)).toEqual(px(edge, 0));
+    expect(px(out, 15)).toEqual(px(edge, 15));
+  });
+
+  it("never overshoots: a crisp edge gets no halo", () => {
+    // Already a hard step, so every pixel sits at its neighbourhood's extreme;
+    // a plain unsharp mask would ring past both sides.
+    const step = makeRaster(12, 3, (x) => (x < 6 ? [28, 23, 18] : [243, 234, 215]));
+    expect(Array.from(sharpenRaster(step, 2).data)).toEqual(Array.from(step.data));
+  });
+
+  it("leaves the adaptive palette alone when given the unsharpened source", () => {
+    const photo = makeRaster(48, 32, (x, y) => {
+      const v = Math.round(40 + 180 / (1 + Math.exp(-(x - 24) * 0.5)) + ((x * 7 + y * 13) % 9));
+      return [v, Math.round(v * 0.8), Math.round(v * 0.6)];
+    });
+    const opts = { colors: 4, palette: "adaptive" as const, method: "floyd_steinberg" as const, seed: 1 };
+    const plain = renderToneDither(photo, opts);
+    const sharp = renderToneDither(sharpenRaster(photo, 1), { ...opts, paletteSource: photo });
+    expect(sharp.palette).toEqual(plain.palette);
+  });
+
+  it("shifts all channels by the same amount, so hue doesn't fringe", () => {
+    const out = sharpenRaster(edge, 1);
+    const before = px(edge, 6);
+    const after = px(out, 6);
+    const d = after.map((v, i) => v - before[i]);
+    expect(Math.abs(d[0] - d[1])).toBeLessThanOrEqual(1);
+    expect(Math.abs(d[0] - d[2])).toBeLessThanOrEqual(1);
   });
 });

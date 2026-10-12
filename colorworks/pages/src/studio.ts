@@ -16,6 +16,7 @@ import {
 import {
   renderToneDither,
   paintIndices,
+  sharpenRaster,
   rgbToHex,
   parseColor,
   type RGB,
@@ -33,6 +34,7 @@ import { boxFit, conformIndexed, type FitMode } from "./output_size";
 import { decodeToBitmap, classifyFile, decodeLabel } from "./decode";
 import { renderHalftone, type HalftoneResult } from "./halftone";
 import { computeProofMetrics, formatBytes } from "./proof";
+import { canEncodeIndexedPng, encodeIndexedPng, isLosslessWebp } from "./png";
 
 // Fixed seed — mirrors the studio's seed=42 so blue-noise/flow are stable.
 const SEED = 42;
@@ -48,6 +50,7 @@ function $$(sel: string): HTMLElement[] {
 }
 
 type ParamValue = string | number | boolean;
+type View = "single" | "grid";
 
 interface RenderState {
   w: number;
@@ -110,12 +113,13 @@ const state = {
   // The render at native resolution — the source of truth for export. #bigCanvas
   // is only its on-screen presentation (which may be a smoothed reduction).
   native: null as HTMLCanvasElement | null,
+  hoverView: null as HTMLCanvasElement | null, // native size, hovered ink isolated
   exportCanvas: null as HTMLCanvasElement | null,
   glyphText: "" as string, // braille+block text of the native repixel render (repixel only)
   // Palette mode before a swatch edit promoted it to exact inks (tone dither);
   // non-null means the palette block offers "revert".
   paletteBeforeEdit: null as string | null,
-  view: "single" as "single" | "grid",
+  view: "single" as View,
   gridSeq: 0,
   gridTimer: 0 as ReturnType<typeof setTimeout> | 0,
   gridDirty: true,
@@ -179,31 +183,58 @@ function showStudio(on: boolean): void {
 
 // ── source decode (local) ─────────────────────────────────────────────────────
 function bindSource(): void {
-  const dz = $("#dropzone");
   const input = $<HTMLInputElement>("#fileInput");
-  dz.addEventListener("click", () => input.click());
+  const browse = () => input.click();
+  $("#dropzone").addEventListener("click", browse);
+  $("#emptyPick").addEventListener("click", browse);
   input.addEventListener("change", () => {
     if (input.files && input.files[0]) loadFile(input.files[0]);
+    input.value = ""; // choosing the same file again should still load it
   });
-  ["dragenter", "dragover"].forEach((ev) =>
-    dz.addEventListener(ev, (e) => {
-      e.preventDefault();
-      dz.classList.add("dragover");
-    }),
-  );
-  ["dragleave", "drop"].forEach((ev) =>
-    dz.addEventListener(ev, (e) => {
-      e.preventDefault();
-      dz.classList.remove("dragover");
-    }),
-  );
-  dz.addEventListener("drop", (e) => {
-    const f = (e as DragEvent).dataTransfer?.files?.[0];
+
+  // The whole window is a drop target: a file dropped anywhere else would make
+  // the browser navigate to it and throw the session away.
+  const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes("Files");
+  let depth = 0; // dragenter/leave fire per element; count to know when it truly left
+  window.addEventListener("dragenter", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    depth++;
+    document.body.classList.add("dropping");
+  });
+  window.addEventListener("dragover", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer!.dropEffect = "copy";
+  });
+  window.addEventListener("dragleave", (e) => {
+    if (!hasFiles(e)) return;
+    depth = Math.max(0, depth - 1);
+    if (depth === 0) document.body.classList.remove("dropping");
+  });
+  window.addEventListener("drop", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    depth = 0;
+    document.body.classList.remove("dropping");
+    const f = e.dataTransfer?.files?.[0];
     if (f) loadFile(f);
+  });
+
+  // Paste an image (a screenshot, a copied photo). Text pastes — hex inks into
+  // the palette box — carry no image file and pass through untouched.
+  window.addEventListener("paste", (e) => {
+    const item = Array.from(e.clipboardData?.items ?? []).find(
+      (it) => it.kind === "file" && it.type.startsWith("image/"),
+    );
+    const file = item?.getAsFile();
+    if (!file) return;
+    e.preventDefault();
+    loadFile(file);
   });
 }
 
-async function loadFile(file: File): Promise<void> {
+async function loadFile(file: File, restored?: { view: View }): Promise<void> {
   $("#srcName").textContent = decodeLabel(classifyFile(file));
   let bitmap: ImageBitmap;
   try {
@@ -234,7 +265,121 @@ async function loadFile(file: File): Promise<void> {
   showStudio(true);
   buildGrid();
   applyStyle(state.styleId); // render the selected style behind the grid
-  setView("grid"); // a new image opens on every style side by side
+  // A new image opens on every style side by side; a restored one where it was.
+  setView(restored?.view ?? "grid");
+  if (!restored) void saveSourceFile(file);
+}
+
+// ── session (survives a refresh) ──────────────────────────────────────────────
+// Settings live in localStorage; the source image in IndexedDB (too big for
+// localStorage). Both are best-effort: private windows or blocked storage just
+// mean a refresh starts fresh.
+const SESSION_KEY = "colorworks.session.v1";
+const SOURCE_DB = "colorworks";
+const SOURCE_MAX_BYTES = 64 * 1024 * 1024;
+
+interface SavedSession {
+  styleId: string;
+  knobValues: Record<string, Record<string, ParamValue>>;
+  setupValues: Record<string, SetupState>;
+  pins: PinnedColor[];
+  customPalette: RGB[];
+  exportScale: number;
+  paletteBeforeEdit: string | null;
+  view: View;
+}
+
+let sessionTimer: ReturnType<typeof setTimeout> | 0 = 0;
+function saveSessionSoon(): void {
+  if (sessionTimer) clearTimeout(sessionTimer);
+  sessionTimer = setTimeout(saveSession, 400);
+}
+
+function saveSession(): void {
+  const saved: SavedSession = {
+    styleId: state.styleId,
+    knobValues: state.knobValues,
+    setupValues: state.setupValues,
+    pins: state.pins,
+    customPalette: state.customPalette,
+    exportScale: state.exportScale,
+    paletteBeforeEdit: state.paletteBeforeEdit,
+    view: state.view,
+  };
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify(saved));
+  } catch {
+    // storage full or blocked — nothing to do
+  }
+}
+
+/** Read the saved settings back into `state`. Anything malformed is dropped
+ *  rather than trusted: the knob code re-validates option values, and an
+ *  unknown style falls back to the default. */
+function restoreSession(): { view: View } | null {
+  let saved: Partial<SavedSession>;
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    saved = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!saved || typeof saved !== "object") return null;
+  const obj = (v: unknown) => !!v && typeof v === "object" && !Array.isArray(v);
+  if (typeof saved.styleId === "string" && STYLES.some((st) => st.id === saved.styleId)) state.styleId = saved.styleId;
+  if (obj(saved.knobValues)) state.knobValues = saved.knobValues!;
+  if (obj(saved.setupValues)) state.setupValues = saved.setupValues!;
+  if (Array.isArray(saved.pins)) {
+    state.pins = saved.pins.filter((p) => p && /^#[0-9a-f]{6}$/i.test(p.hex) && ["lock", "boost", "exclude"].includes(p.mode));
+  }
+  if (Array.isArray(saved.customPalette) && saved.customPalette.length >= 2 &&
+      saved.customPalette.every((c) => Array.isArray(c) && c.length === 3 && c.every((v) => Number.isInteger(v) && v >= 0 && v <= 255))) {
+    state.customPalette = saved.customPalette;
+  }
+  if (EXPORT_SCALES.includes(saved.exportScale as number)) state.exportScale = saved.exportScale!;
+  if (typeof saved.paletteBeforeEdit === "string") state.paletteBeforeEdit = saved.paletteBeforeEdit;
+  return { view: saved.view === "single" ? "single" : "grid" };
+}
+
+function openSourceDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(SOURCE_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore("files");
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function saveSourceFile(file: File): Promise<void> {
+  if (file.size > SOURCE_MAX_BYTES) return;
+  try {
+    const db = await openSourceDb();
+    const tx = db.transaction("files", "readwrite");
+    tx.objectStore("files").put(file, "source");
+    tx.oncomplete = () => db.close();
+  } catch {
+    // storage unavailable — the session just won't survive a refresh
+  }
+}
+
+async function loadSourceFile(): Promise<File | null> {
+  try {
+    const db = await openSourceDb();
+    return await new Promise<File | null>((resolve) => {
+      const req = db.transaction("files").objectStore("files").get("source");
+      req.onsuccess = () => {
+        db.close();
+        resolve(req.result instanceof Blob ? (req.result as File) : null);
+      };
+      req.onerror = () => {
+        db.close();
+        resolve(null);
+      };
+    });
+  } catch {
+    return null;
+  }
 }
 
 // ── output controls ───────────────────────────────────────────────────────────
@@ -496,10 +641,20 @@ function toRenderOptions(v: Record<string, ParamValue>): RenderOptions {
 // ── local rasterisation (replaces server resize + asset fetch) ─────────────────
 /** Draw the source into an offscreen canvas at the output size and read pixels.
  *  `fullRes` ignores the output-size setting (depixelate needs the native grid).
+ *  `sharpen` > 0 returns an unsharp-masked copy of that raster.
  *  `memo`, when given, reuses rasters across calls with the same geometry (the
  *  variant grid renders ~20 styles from the same few rasters; renderers never
  *  write to their input). */
-function rasterizeSource(setup: SetupState, fullRes = false, memo?: Map<string, Raster>): Raster {
+function rasterizeSource(setup: SetupState, fullRes = false, memo?: Map<string, Raster>, sharpen = 0): Raster {
+  if (sharpen > 0) {
+    const base = rasterizeSource(setup, fullRes, memo);
+    const key = `${setup.maxW}|${setup.maxH}|${setup.fit}|${fullRes}|s${sharpen}`;
+    const hit = memo?.get(key);
+    if (hit) return hit;
+    const out = sharpenRaster(base, sharpen);
+    memo?.set(key, out);
+    return out;
+  }
   const { maxW, maxH, fit } = setup;
   const sw = state.sourceW;
   const sh = state.sourceH;
@@ -539,7 +694,7 @@ function renderStyle(
   style: StyleDef,
   vals: Record<string, ParamValue>,
   setup: SetupState,
-  memo?: Map<string, Raster>,
+  memo = new Map<string, Raster>(),
 ): StyleRender {
   // Depixelate, Repixel, and Knit derive their own resolution from the full-res
   // grid, so they must see the source at native size (not the output-downscaled
@@ -548,7 +703,11 @@ function renderStyle(
     style.renderer === "depixelate" ||
     style.renderer === "repixel" ||
     style.renderer === "knit";
+  // `raster` (the unsharpened source) is what the proof compares against and
+  // what palettes are drawn from; `input` is what gets dithered. Only styles
+  // with a sharpen knob (the tone dithers) have one.
   const raster = rasterizeSource(setup, nativeRes, memo);
+  const input = rasterizeSource(setup, nativeRes, memo, numParam(vals, "sharpen", 0));
   const out: Omit<StyleRender, "res"> = { raster, info: "" };
   let res: RenderResult;
   if (style.renderer === "halftone") {
@@ -661,7 +820,7 @@ function renderStyle(
       ` · max float ${stats.maxFloat}` +
       ` · max ${stats.maxYarnsPerRow} yarns/row`;
   } else {
-    res = renderToneDither(raster, toRenderOptions(vals));
+    res = renderToneDither(input, { ...toRenderOptions(vals), paletteSource: raster });
   }
   // The grid renderers detect + tile on the native grid, so their raw output
   // size is decoupled from the output-size control; scale to the requested size
@@ -703,9 +862,6 @@ function renderFocus(): void {
     };
     state.hoverIdx = null;
 
-    const native = nativeCanvas();
-    native.width = res.width;
-    native.height = res.height;
     redrawCanvas();
     buildSwatches();
     buildPins();
@@ -719,7 +875,7 @@ function renderFocus(): void {
     $("#specRender").textContent = `${elapsed} ms`;
     const proof = computeProofMetrics(out.raster, res);
     $("#specColors").textContent = proof ? String(proof.usedColors) : "n/a";
-    $("#specError").textContent = proof ? `ΔE ${proof.perceptualError.toFixed(1)}` : "n/a";
+    $("#specError").textContent = proof ? `ΔE ${proof.viewingError.toFixed(1)}` : "n/a";
     $("#specTone").textContent = proof ? `${proof.lowFrequencyError.toFixed(1)}%` : "n/a";
     buildPlateStrip();
     $("#copyGlyphs").hidden = style.renderer !== "repixel";
@@ -727,6 +883,7 @@ function renderFocus(): void {
 
     applyZoom();
     scheduleExport();
+    saveSessionSoon();
   });
 }
 
@@ -759,11 +916,14 @@ function gridSetup(style: StyleDef): { setup: SetupState; reduced: boolean } {
   };
 }
 
-function setView(view: "single" | "grid"): void {
+function setView(view: View): void {
   state.view = view;
   $$("#viewGroup button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   $("#variantView").hidden = view !== "grid";
   $("#singleView").hidden = view !== "single";
+  $("#gridHint").hidden = view !== "grid";
+  $("#stageExport").hidden = view !== "single";
+  saveSessionSoon();
   if (view === "grid") {
     markSelectedVariant();
     if (state.gridDirty) renderGrid();
@@ -926,18 +1086,41 @@ function nativeCanvas(): HTMLCanvasElement {
   return (state.native ??= document.createElement("canvas"));
 }
 
-/** Paint the render into the native canvas, then present it on screen. */
-function redrawCanvas(): void {
-  const R = state.render;
-  if (!R) return;
-  const { w: W, h: H, idx, palette } = R;
-  const n = idx.length;
-  const out = new Uint8ClampedArray(n * 4);
-  const oc: RGB[] = palette.map((c) => {
+/** The render's palette with swatch remaps applied — what export writes. */
+function shownPalette(R: RenderState): RGB[] {
+  return R.palette.map((c) => {
     const m = state.colorMap[rgbToHex(c)];
     return m ? parseColor(m) : c;
   });
-  const hi = state.hoverIdx;
+}
+
+/** Paint the render into the native canvas (always the clean image — export
+ *  reads it), plus a hover-isolated copy while a swatch is hovered, then
+ *  present whichever applies. */
+function redrawCanvas(): void {
+  const R = state.render;
+  if (!R) return;
+  paintRender(nativeCanvas(), R, shownPalette(R), null);
+  showHover();
+}
+
+/** Present the render, isolating the hovered ink if there is one. */
+function showHover(): void {
+  const R = state.render;
+  if (R && state.hoverIdx !== null) {
+    paintRender((state.hoverView ??= document.createElement("canvas")), R, shownPalette(R), state.hoverIdx);
+  }
+  presentCanvas();
+}
+
+function paintRender(cv: HTMLCanvasElement, R: RenderState, oc: RGB[], hi: number | null): void {
+  const { w: W, h: H, idx } = R;
+  if (cv.width !== W || cv.height !== H) {
+    cv.width = W;
+    cv.height = H;
+  }
+  const n = idx.length;
+  const out = new Uint8ClampedArray(n * 4);
   const paper: RGB = [247, 240, 225];
   const outline: RGB = [232, 72, 47];
 
@@ -969,10 +1152,9 @@ function redrawCanvas(): void {
     out[o + 2] = c[2];
     out[o + 3] = 255;
   }
-  const ctx = nativeCanvas().getContext("2d")!;
+  const ctx = cv.getContext("2d")!;
   ctx.putImageData(new ImageData(out, W, H), 0, 0);
-  drawKnitSymbols(ctx, R, oc);
-  presentCanvas();
+  drawKnitSymbols(ctx, R, oc, hi);
 }
 
 /** Draw `src` into `dst` at `dev` device pixels per source pixel, faithfully:
@@ -1020,7 +1202,7 @@ function paintScaled(dst: HTMLCanvasElement, src: HTMLCanvasElement, dev: number
 
 /** Show the native render on #bigCanvas at the current zoom. */
 function presentCanvas(): void {
-  const src = state.native;
+  const src = state.hoverIdx !== null && state.hoverView ? state.hoverView : state.native;
   if (!src || !src.width || !src.height) return;
   const cv = $<HTMLCanvasElement>("#bigCanvas");
   const scale = displayScale(src.width, src.height);
@@ -1030,10 +1212,16 @@ function presentCanvas(): void {
   $("#zoomVal").textContent = `${Math.round(scale * 100)}%`;
 }
 
-function drawKnitSymbols(ctx: CanvasRenderingContext2D, R: RenderState, palette: RGB[]): void {
+/** Whether the chart has symbols drawn over its cells (anti-aliased text, so
+ *  the image is no longer a pure index map). */
+function hasCellSymbols(R: RenderState): boolean {
   const k = R.knit;
-  if (!k || k.symbolMode !== "cells" || k.symbols.length === 0 || k.cell < 7) return;
-  const hi = state.hoverIdx;
+  return !!k && k.symbolMode === "cells" && k.symbols.length > 0 && k.cell >= 7;
+}
+
+function drawKnitSymbols(ctx: CanvasRenderingContext2D, R: RenderState, palette: RGB[], hi: number | null): void {
+  const k = R.knit;
+  if (!k || !hasCellSymbols(R)) return;
   const fontSize = Math.max(6, Math.floor(k.cell * 0.68));
   ctx.save();
   ctx.globalAlpha = 1;
@@ -1116,12 +1304,12 @@ function buildSwatches(): void {
       state.hoverIdx = i;
       $$(".swatch").forEach((s) => s.classList.remove("active"));
       btn.classList.add("active");
-      redrawCanvas();
+      showHover();
     });
     btn.addEventListener("mouseleave", () => {
       state.hoverIdx = null;
       btn.classList.remove("active");
-      redrawCanvas();
+      showHover();
     });
     btn.addEventListener("click", () => openRecolor(hex, i));
     wrap.appendChild(btn);
@@ -1315,17 +1503,25 @@ function bindPins(): void {
   });
 }
 
-// ── export (local PNG + Web Crypto checksum) ──────────────────────────────────
+// ── export (local, lossless, + Web Crypto checksum) ───────────────────────────
 // Upscaled exports are capped so a big render × 8 can't allocate a canvas the
 // browser refuses (or a multi-hundred-MB PNG); larger scales are disabled.
 const EXPORT_SCALES = [1, 2, 4, 8];
 const EXPORT_MAX_SIDE = 8192;
 const EXPORT_MAX_PIXELS = 4096 * 4096;
+// Both formats are lossless: a dither is exact dots, and lossy codecs (JPEG,
+// lossy WebP) smear them into mud while rarely being smaller.
 const EXPORT_FORMATS = [
-  { id: "Png", mime: "image/png", ext: "png", quality: undefined },
-  { id: "Webp", mime: "image/webp", ext: "webp", quality: 0.9 },
-  { id: "Jpeg", mime: "image/jpeg", ext: "jpg", quality: 0.85 },
-];
+  { id: "Png", ext: "png" },
+  { id: "Webp", ext: "webp" },
+] as const;
+type ExportFormatId = (typeof EXPORT_FORMATS)[number]["id"];
+
+interface Encoded {
+  blob: Blob | null;
+  /** Card subtitle when encoded, or why the format is unavailable. */
+  note: string;
+}
 
 function canvasBlob(canvas: HTMLCanvasElement, mime: string, quality?: number): Promise<Blob | null> {
   return new Promise((resolve) => canvas.toBlob(resolve, mime, quality));
@@ -1351,6 +1547,7 @@ function bindExportScale(): void {
       state.exportScale = parseInt(b.dataset.scale || "1", 10);
       updateScaleUI();
       scheduleExport();
+      saveSessionSoon();
     }),
   );
 }
@@ -1384,47 +1581,92 @@ function exportSource(): HTMLCanvasElement | null {
   return cv;
 }
 
-/** Encoding three formats is the slow part of a knob tweak at large export
- *  sizes, so wait for the knobs to settle. Until then the format cards are
- *  disabled — a click must never download the previous render. */
+/** PNG straight from the index map at 1–8 bits per pixel — several times
+ *  smaller than the canvas's 32-bit PNG. Falls back to the canvas when the
+ *  image isn't a pure index map (knit symbols are anti-aliased text). */
+async function encodePng(R: RenderState): Promise<Encoded> {
+  const palette = shownPalette(R);
+  let maxIdx = 0;
+  for (let i = 0; i < R.idx.length; i++) if (R.idx[i] > maxIdx) maxIdx = R.idx[i];
+  if (canEncodeIndexedPng() && palette.length <= 256 && maxIdx < palette.length && !hasCellSymbols(R)) {
+    try {
+      const blob = await encodeIndexedPng(R.idx, R.w, R.h, palette, effectiveExportScale());
+      return { blob, note: "lossless · indexed" };
+    } catch {
+      // fall through to the canvas encoder
+    }
+  }
+  const cv = exportSource();
+  return { blob: cv ? await canvasBlob(cv, "image/png") : null, note: "lossless" };
+}
+
+/** Lossless WebP, where the browser's encoder offers it (Chrome does at
+ *  quality 1; others may silently encode lossy or fall back to PNG). */
+async function encodeWebp(): Promise<Encoded> {
+  const cv = exportSource();
+  const blob = cv ? await canvasBlob(cv, "image/webp", 1) : null;
+  if (!blob || blob.type !== "image/webp") return { blob: null, note: "not in this browser" };
+  const head = new Uint8Array(await blob.slice(0, 4096).arrayBuffer());
+  if (!isLosslessWebp(head)) return { blob: null, note: "lossy only here" };
+  return { blob, note: "lossless" };
+}
+
+/** Encoding is the slow part of a knob tweak at large export sizes, so wait
+ *  for the knobs to settle. Until then the download links are disabled — a
+ *  click must never download the previous render. */
 function scheduleExport(): void {
   state.exportSeq++;
   EXPORT_FORMATS.forEach((f) => {
-    const link = $(`#export${f.id}`);
-    link.classList.add("disabled", "pending");
+    $(`#export${f.id}`).classList.add("disabled", "pending");
     $(`#size${f.id}`).textContent = "…";
   });
+  $("#stageExport").classList.add("disabled");
+  $("#stageExportMeta").textContent = "…";
   if (state.exportTimer) clearTimeout(state.exportTimer);
   state.exportTimer = setTimeout(() => void updateExport(), 220);
 }
 
 async function updateExport(): Promise<void> {
-  const cv = exportSource();
-  if (!cv) return;
+  const R = state.render;
+  if (!R || !state.native?.width) return;
   const seq = ++state.exportSeq;
-  const formats = EXPORT_FORMATS;
-  const blobs = await Promise.all(formats.map((f) => canvasBlob(cv, f.mime, f.quality)));
+  const [png, webp] = await Promise.all([encodePng(R), encodeWebp()]);
   if (seq !== state.exportSeq) return;
-  formats.forEach((format, i) => {
-    const blob = blobs[i];
+  const results: Record<ExportFormatId, Encoded> = { Png: png, Webp: webp };
+  EXPORT_FORMATS.forEach((format) => {
+    const { blob, note } = results[format.id];
     const link = $<HTMLAnchorElement>(`#export${format.id}`);
-    const size = $(`#size${format.id}`);
     const old = state.exportUrls[format.ext];
     if (old) URL.revokeObjectURL(old);
-    if (!blob || (format.mime !== "image/png" && blob.type !== format.mime)) {
+    delete state.exportUrls[format.ext];
+    link.classList.remove("pending");
+    $(`#note${format.id}`).textContent = note;
+    if (!blob) {
       link.classList.add("disabled");
-      link.classList.remove("pending");
-      size.textContent = "unsupported";
+      link.removeAttribute("href");
+      $(`#size${format.id}`).textContent = "—";
       return;
     }
     const url = URL.createObjectURL(blob);
     state.exportUrls[format.ext] = url;
     link.href = url;
     link.download = exportFilename(format.ext);
-    link.classList.remove("disabled", "pending");
-    size.textContent = formatBytes(blob.size);
+    link.classList.remove("disabled");
+    $(`#size${format.id}`).textContent = formatBytes(blob.size);
   });
-  if (blobs[0]) void setChecksum(blobs[0]);
+  // The stage's download button is the PNG — the one format every app opens.
+  const stage = $<HTMLAnchorElement>("#stageExport");
+  const s = effectiveExportScale();
+  if (png.blob) {
+    stage.href = state.exportUrls.png;
+    stage.download = exportFilename("png");
+    stage.classList.remove("disabled");
+    $("#stageExportMeta").textContent = `${R.w * s} × ${R.h * s} · ${formatBytes(png.blob.size)}`;
+    void setChecksum(png.blob);
+  } else {
+    stage.removeAttribute("href");
+    $("#stageExportMeta").textContent = "unavailable";
+  }
 }
 
 async function setChecksum(blob: Blob): Promise<void> {
@@ -1434,9 +1676,9 @@ async function setChecksum(blob: Blob): Promise<void> {
     const hex = Array.from(new Uint8Array(hash))
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
-    $("#specHash").textContent = hex.slice(0, 12);
+    $("#exportPng").title = `SHA-256 ${hex}`;
   } catch {
-    $("#specHash").textContent = "—";
+    $("#exportPng").title = "";
   }
 }
 
@@ -1567,6 +1809,7 @@ async function copyGlyphText(): Promise<void> {
 
 // ── init ──────────────────────────────────────────────────────────────────────
 function init(): void {
+  const restored = restoreSession();
   buildStyleSelect();
   bindSource();
   bindOutput();
@@ -1592,6 +1835,11 @@ function init(): void {
   updateStyleUI();
   $("#copyGlyphs").addEventListener("click", () => copyGlyphText());
   showStudio(false);
+  if (restored) {
+    void loadSourceFile().then((file) => {
+      if (file && !state.source) loadFile(file, restored);
+    });
+  }
 
   let resizeRAF = 0;
   window.addEventListener("resize", () => {
