@@ -36,6 +36,13 @@ export interface ParamDef {
   visibleWhen?: VisibleWhen | VisibleWhen[];
 }
 
+/** Unsharp-mask amount applied to the resized source before dithering (the
+ *  studio does this, not the renderer). Overshoot-clamped, so it crisps soft
+ *  photo edges without haloing hard ones. Tone dithers only: the halftone
+ *  screen and block mosaic average over cells, which cancels it. Pages-only,
+ *  like palette spread. */
+const SHARPEN_DEFAULT = 0.5;
+
 /** Mirror of tone_dither.py DEFINITION.parameters (plus `flat` as a method). */
 export const TONE_DITHER_PARAMS: ParamDef[] = [
   {
@@ -224,6 +231,16 @@ export const TONE_DITHER_PARAMS: ParamDef[] = [
     step: 0.5,
     group: "pattern",
     visibleWhen: { param: "method", equals: ["flow"] },
+  },
+  {
+    key: "sharpen",
+    label: "Sharpen",
+    type: "float",
+    default: SHARPEN_DEFAULT,
+    min: 0,
+    max: 2,
+    step: 0.05,
+    group: "tone",
   },
   {
     key: "contrast",

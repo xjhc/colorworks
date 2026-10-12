@@ -101,6 +101,10 @@ export interface RenderOptions {
   params?: RenderParams;
   seed?: number;
   pins?: PinnedColor[];
+  /** Where the adaptive palette is drawn from, when that differs from the
+   *  raster being dithered — e.g. a sharpened copy, whose halos shouldn't move
+   *  the inks. Defaults to the raster itself. */
+  paletteSource?: Raster;
 }
 
 export interface RenderResult {
@@ -154,9 +158,11 @@ const linearToSrgbChannel = (c: number): number =>
 
 /** sRGB (0..1) → OKLab [L, a, b] written into `out` at offset `o`. */
 export function srgbToOklabInto(r: number, g: number, b: number, out: Float32Array, o: number): void {
-  const lr = srgbToLinearChannel(r);
-  const lg = srgbToLinearChannel(g);
-  const lb = srgbToLinearChannel(b);
+  linearToOklabInto(srgbToLinearChannel(r), srgbToLinearChannel(g), srgbToLinearChannel(b), out, o);
+}
+
+/** Linear-light RGB (0..1) → OKLab [L, a, b] written into `out` at offset `o`. */
+export function linearToOklabInto(lr: number, lg: number, lb: number, out: Float32Array, o: number): void {
   const l = 0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb;
   const m = 0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb;
   const s = 0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb;
@@ -244,6 +250,43 @@ export function applyTone(
     rgb01[j + 1] = Math.min(1, rgb01[j + 1] * scale);
     rgb01[j + 2] = Math.min(1, rgb01[j + 2] * scale);
   }
+}
+
+/** Unsharp mask on luma: every channel gets `amount` × (luma − blurred luma),
+ *  so edges crisp up without colour fringes. Meant for the resized raster,
+ *  before dithering — downscaling softens edges and dither texture blurs them
+ *  further. The sharpened luma is clamped to its 3×3 neighbourhood's range, so
+ *  soft edges steepen but an already-crisp edge can't overshoot: a halo past
+ *  the darkest or lightest ink would otherwise become a dithered outline and
+ *  stray specks in flat areas. Returns a new raster (or `raster` itself when
+ *  amount ≤ 0). */
+export function sharpenRaster(raster: Raster, amount: number, sigma = 1): Raster {
+  if (!(amount > 0)) return raster;
+  const { width: w, height: h, data } = raster;
+  const gray = rasterToGray(raster);
+  const blurred = gaussianBlur(gray, w, h, sigma);
+  const out = new Uint8ClampedArray(data.length);
+  for (let i = 0; i < gray.length; i++) {
+    const x = i % w;
+    const y = (i / w) | 0;
+    let lo = gray[i];
+    let hi = gray[i];
+    for (let yy = Math.max(0, y - 1); yy <= Math.min(h - 1, y + 1); yy++) {
+      for (let xx = Math.max(0, x - 1); xx <= Math.min(w - 1, x + 1); xx++) {
+        const v = gray[yy * w + xx];
+        if (v < lo) lo = v;
+        else if (v > hi) hi = v;
+      }
+    }
+    const target = Math.min(hi, Math.max(lo, gray[i] + amount * (gray[i] - blurred[i])));
+    const d = (target - gray[i]) * 255;
+    const o = i * 4;
+    out[o] = data[o] + d;
+    out[o + 1] = data[o + 1] + d;
+    out[o + 2] = data[o + 2] + d;
+    out[o + 3] = data[o + 3];
+  }
+  return { width: w, height: h, data: out };
 }
 
 // ── Separable Gaussian blur (edge-replicated), mirrors image_ops.gaussian_blur ──
@@ -1897,7 +1940,7 @@ export function renderToneDither(raster: Raster, opts: RenderOptions = {}): Rend
   const p = opts.params ?? {};
 
   const palette = buildTonePalette(
-    raster,
+    opts.paletteSource ?? raster,
     colors,
     mode,
     opts.inkColor ?? "#161616",
